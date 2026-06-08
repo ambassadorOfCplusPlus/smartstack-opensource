@@ -16,6 +16,7 @@
 | [**writeoff-engine/**](writeoff-engine/) | **Движок партионного учёта**: списание по партиям FIFO / LIFO / средневзвешенная, резервы, возвраты. Storage-agnostic (свой `BatchStore`). | TypeScript (+ C++ оригинал в `cpp-reference/`) | ✅ 14/14 тестов |
 | [**installer-glue/**](installer-glue/) | **Склейка установщика**: дописывает в конец готового `base.exe` хвост с манифестом/файлами → персональный установщик за миллисекунды, без перекомпиляции. Lib + CLI. | Node.js (только builtins) | ✅ 7/7 тестов |
 | [**marketplace-adapters/**](marketplace-adapters/) | **Адаптеры маркетплейсов** (FBS): Wildberries / Ozon / Yandex.Market / Sber — выгрузка остатков и цен, импорт заказов. HTTP-клиент инъектируется, ключи продавца не хранятся в библиотеке. | TypeScript (zero runtime deps) | ✅ 23/23 тестов |
+| [**sync-engine/**](sync-engine/) | **Offline-first синхронизация** (референс-дизайн + ядро): журнал событий, идемпотентность по UUID, vector clocks, gap-free pull (xmin-горизонт), 2 типа конфликтов (физический → недостача, смысловой → голосование). | TypeScript (ядро) + [DESIGN.md](sync-engine/docs/DESIGN.md) + оригинал в `reference/` | ✅ 40/40 тестов |
 
 ## Почему это интересно
 - **E2E-крипта, совместимая между платформами** — один формат `crypto_box`/`secretbox`

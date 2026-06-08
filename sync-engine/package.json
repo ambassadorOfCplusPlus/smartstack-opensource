@@ -1,0 +1,35 @@
+{
+  "name": "@smartstack/sync-engine",
+  "version": "0.1.0",
+  "description": "Offline-first event-sync core: vector clocks, idempotent journal, conflict classification (physical vs semantic). Extracted from SmartStock.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "docs",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "offline-first",
+    "sync",
+    "vector-clock",
+    "crdt",
+    "conflict-resolution",
+    "event-sourcing",
+    "idempotency"
+  ],
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
