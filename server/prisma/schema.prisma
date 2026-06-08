@@ -1,0 +1,94 @@
+// Smartstack Messenger — схема БД (только мессенджер, без ERP).
+// Извлечено из SmartStock: Organization урезана до id/name/messengerUserLimit.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Организация-инстанс. В standalone-мессенджере она одна; держит лимит
+// пользователей мессенджера. Все ERP-поля удалены.
+model Organization {
+  id                 String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name               String
+  // Лимит пользователей мессенджера. Админ ограничивает число лёгких аккаунтов.
+  messengerUserLimit Int    @default(15) @map("messenger_user_limit")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  messengerUsers MessengerUser[]
+
+  @@map("organizations")
+}
+
+// Пользователь мессенджера — лёгкий аккаунт. Админ создаёт запись → выдаётся
+// короткий messengerId (ключ); человек по нему регистрируется (имя + пароль +
+// опц. почта). passwordHash = null, пока не зарегистрирован.
+model MessengerUser {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  messengerId    String       @unique @map("messenger_id") // короткий код входа/поиска
+  displayName    String?      @map("display_name")
+  passwordHash   String?      @map("password_hash") // null = ещё не зарегистрирован
+  recoveryEmail  String?      @map("recovery_email")
+  // E2E: публичный ключ пользователя (base64). Приватный ключ НИКОГДА не покидает
+  // устройство — сервер хранит только публичный, чтобы другие могли шифровать.
+  publicKey      String?      @map("public_key")
+  isActive       Boolean      @default(true) @map("is_active")
+  registeredAt   DateTime?    @map("registered_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  participations MessengerParticipant[]
+  sentMessages   MessengerMessage[]
+
+  @@index([organizationId])
+  @@map("messenger_users")
+}
+
+// Переписка — отдельные таблицы, полностью изолированы.
+model MessengerConversation {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  isGroup        Boolean  @default(false) @map("is_group")
+  title          String?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  participants MessengerParticipant[]
+  messages     MessengerMessage[]
+
+  @@index([organizationId])
+  @@map("messenger_conversations")
+}
+
+model MessengerParticipant {
+  conversationId  String                @map("conversation_id") @db.Uuid
+  messengerUserId String                @map("messenger_user_id") @db.Uuid
+  lastReadAt      DateTime?             @map("last_read_at")
+  conversation    MessengerConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  messengerUser   MessengerUser         @relation(fields: [messengerUserId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, messengerUserId])
+  @@index([messengerUserId])
+  @@map("messenger_participants")
+}
+
+model MessengerMessage {
+  id             String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId String                @map("conversation_id") @db.Uuid
+  senderId       String                @map("sender_id") @db.Uuid
+  body           String
+  attachmentUrl  String?               @map("attachment_url")
+  createdAt      DateTime              @default(now()) @map("created_at")
+  conversation   MessengerConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender         MessengerUser         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@map("messenger_messages")
+}

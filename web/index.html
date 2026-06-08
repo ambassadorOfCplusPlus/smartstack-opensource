@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SmartStock Мессенджер</title>
+<!-- E2E: tweetnacl реализует NaCl box (X25519+XSalsa20-Poly1305) — совместимо с
+     libsodium crypto_box в Qt-клиенте. Формат на проводе: e2e:base64(nonce+box). -->
+<script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tweetnacl-util@0.15.1/nacl-util.min.js"></script>
+<style>
+  :root { --bg:#0b141a; --panel:#111b21; --panel2:#202c33; --accent:#00a884;
+          --text:#e9edef; --muted:#8696a0; --bubble-me:#005c4b; --bubble-you:#202c33; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); height:100vh; }
+  .hidden { display:none !important; }
+  /* Экран входа */
+  #auth { height:100vh; display:flex; align-items:center; justify-content:center; }
+  .card { background:var(--panel); padding:24px; border-radius:12px; width:340px; max-width:92vw; }
+  .card h1 { margin:0 0 4px; font-size:20px; }
+  .card .sub { color:var(--muted); font-size:13px; margin-bottom:16px; }
+  .tabs { display:flex; gap:8px; margin-bottom:14px; }
+  .tabs button { flex:1; background:var(--panel2); color:var(--text); border:0; padding:8px; border-radius:8px; cursor:pointer; }
+  .tabs button.active { background:var(--accent); color:#04221c; font-weight:600; }
+  input, textarea { width:100%; background:var(--panel2); color:var(--text); border:1px solid #2a3942;
+                    border-radius:8px; padding:10px; margin:6px 0; font-size:14px; }
+  .btn { width:100%; background:var(--accent); color:#04221c; border:0; padding:11px; border-radius:8px;
+         font-weight:600; cursor:pointer; font-size:15px; margin-top:8px; }
+  .btn.sec { background:var(--panel2); color:var(--text); }
+  .err { color:#ff6b6b; font-size:13px; min-height:18px; margin-top:6px; }
+  .ok { color:var(--accent); font-size:13px; }
+  /* Главный экран */
+  #app { display:flex; height:100vh; }
+  #side { width:34%; min-width:260px; max-width:380px; background:var(--panel); border-right:1px solid #2a3942; display:flex; flex-direction:column; }
+  #side .head { padding:12px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid #2a3942; }
+  #side .head .me { font-weight:600; }
+  .iconbtn { background:var(--panel2); border:0; color:var(--text); border-radius:8px; padding:6px 10px; cursor:pointer; }
+  #search { margin:10px; }
+  #convs { flex:1; overflow-y:auto; }
+  .conv { padding:12px; cursor:pointer; border-bottom:1px solid #1b262c; display:flex; justify-content:space-between; gap:8px; }
+  .conv:hover, .conv.active { background:var(--panel2); }
+  .conv .t { font-weight:600; }
+  .conv .l { color:var(--muted); font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px; }
+  .badge { background:var(--accent); color:#04221c; border-radius:10px; padding:0 7px; font-size:12px; font-weight:700; height:18px; display:inline-flex; align-items:center; }
+  #main { flex:1; display:flex; flex-direction:column; background:var(--bg); }
+  #mhead { padding:14px; border-bottom:1px solid #2a3942; background:var(--panel); font-weight:600; }
+  #msgs { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:8px; }
+  .msg { max-width:70%; padding:8px 10px; border-radius:8px; font-size:14px; word-wrap:break-word; }
+  .msg.me { align-self:flex-end; background:var(--bubble-me); }
+  .msg.you { align-self:flex-start; background:var(--bubble-you); }
+  .msg .meta { display:block; color:var(--muted); font-size:11px; margin-top:3px; }
+  .msg a { color:#8fd3ff; }
+  #composer { display:flex; gap:8px; padding:12px; border-top:1px solid #2a3942; background:var(--panel); }
+  #composer input[type=text] { margin:0; }
+  #empty { flex:1; display:flex; align-items:center; justify-content:center; color:var(--muted); }
+  /* Модалка поиска */
+  #modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; }
+  #modal .card { width:360px; }
+  .urow { padding:10px; border-radius:8px; cursor:pointer; display:flex; justify-content:space-between; }
+  .urow:hover { background:var(--panel2); }
+  .urow .id { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+
+<!-- ── Экран входа/регистрации ─────────────────────────────────────────────── -->
+<div id="auth">
+  <div class="card">
+    <h1>SmartStock Мессенджер</h1>
+    <div class="sub">Вход по ключу, который выдал администратор.</div>
+    <div class="tabs">
+      <button id="tabLogin" class="active" onclick="setTab('login')">Вход</button>
+      <button id="tabReg" onclick="setTab('reg')">Регистрация</button>
+    </div>
+
+    <div id="paneLogin">
+      <input id="liKey" placeholder="Ключ (например ABCD1234)" autocomplete="off">
+      <input id="liPass" type="password" placeholder="Пароль">
+      <button class="btn" onclick="doLogin()">Войти</button>
+    </div>
+
+    <div id="paneReg" class="hidden">
+      <input id="rgKey" placeholder="Ключ от администратора" autocomplete="off">
+      <input id="rgName" placeholder="Ваше имя">
+      <input id="rgPass" type="password" placeholder="Придумайте пароль (мин. 6)">
+      <input id="rgEmail" type="email" placeholder="E-mail для восстановления (необязательно)">
+      <button class="btn" onclick="doRegister()">Зарегистрироваться</button>
+    </div>
+
+    <div class="err" id="authErr"></div>
+    <details style="margin-top:10px; color:var(--muted); font-size:12px;">
+      <summary>Адрес сервера</summary>
+      <input id="apiBase" placeholder="https://erp.компания.ru или http://203.0.113.5" style="margin-top:6px;">
+      <div style="font-size:11px;">Адрес сервера вашей компании (его даёт администратор):
+        домен → https://erp.компания.ru; только IP → http://203.0.113.5 (или https://… с сертификатом).
+        По умолчанию — текущий сайт.</div>
+    </details>
+  </div>
+</div>
+
+<!-- ── Главный экран ───────────────────────────────────────────────────────── -->
+<div id="app" class="hidden">
+  <div id="side">
+    <div class="head">
+      <span class="me" id="meName">—</span>
+      <span>
+        <button class="iconbtn" onclick="openSearch()">＋ Диалог</button>
+        <button class="iconbtn" onclick="openGroup()">👥 Группа</button>
+        <button class="iconbtn" onclick="logout()">Выйти</button>
+      </span>
+    </div>
+    <input id="search" placeholder="Поиск по диалогам" oninput="renderConvs()">
+    <div id="convs"></div>
+  </div>
+  <div id="main">
+    <div id="empty">Выберите диалог или начните новый</div>
+    <div id="chat" class="hidden" style="display:flex; flex-direction:column; height:100%;">
+      <div id="mhead"></div>
+      <div id="msgs"></div>
+      <div id="composer">
+        <button class="iconbtn" onclick="document.getElementById('file').click()" title="Файл">📎</button>
+        <input type="file" id="file" class="hidden" onchange="sendFile()">
+        <input type="text" id="msgInput" placeholder="Сообщение" onkeydown="if(event.key==='Enter')sendMsg()">
+        <button class="btn" style="width:auto; margin:0; padding:10px 16px;" onclick="sendMsg()">▶</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Модалка нового диалога ──────────────────────────────────────────────── -->
+<div id="modal" class="hidden">
+  <div class="card">
+    <h1 id="modalTitle" style="font-size:18px;">Новый диалог</h1>
+    <input id="groupName" class="hidden" placeholder="Название группы" autocomplete="off">
+    <input id="searchUser" placeholder="Имя или ключ собеседника" oninput="searchUsers()" autocomplete="off">
+    <div id="userList" style="max-height:300px; overflow-y:auto;"></div>
+    <button id="createGroupBtn" class="btn hidden" onclick="createGroupConv()">Создать группу</button>
+    <button class="btn sec" onclick="closeSearch()">Закрыть</button>
+  </div>
+</div>
+
+<script>
+// ── Состояние и хелперы ─────────────────────────────────────────────────────
+const LS = window.localStorage;
+let token = LS.getItem('msg_token') || '';
+let me = JSON.parse(LS.getItem('msg_me') || 'null');
+let apiBase = LS.getItem('msg_api') || (location.origin);
+let convs = [];
+let activeId = null;
+let pollTimer = null;
+
+// ── E2E (tweetnacl) ──────────────────────────────────────────────────────────
+let myKeys = null;            // { publicKey: Uint8Array, secretKey: Uint8Array }
+const convOtherPub = {};      // convId → публичный ключ собеседника (base64)
+const userPub = {};           // userId → публичный ключ (из контактов)
+function e2eLoadKeys(selfId) {
+  const saved = LS.getItem('msg_keys_' + selfId);
+  if (saved) {
+    const o = JSON.parse(saved);
+    myKeys = { publicKey: nacl.util.decodeBase64(o.pk), secretKey: nacl.util.decodeBase64(o.sk) };
+  } else {
+    myKeys = nacl.box.keyPair();
+    LS.setItem('msg_keys_' + selfId, JSON.stringify({
+      pk: nacl.util.encodeBase64(myKeys.publicKey),
+      sk: nacl.util.encodeBase64(myKeys.secretKey),
+    }));
+  }
+  return nacl.util.encodeBase64(myKeys.publicKey);
+}
+function e2eEnc(theirPubB64, plainStr) {
+  if (!myKeys || !theirPubB64) return plainStr; // нет ключа → как есть
+  const nonce = nacl.randomBytes(24);
+  const box = nacl.box(nacl.util.decodeUTF8(plainStr), nonce, nacl.util.decodeBase64(theirPubB64), myKeys.secretKey);
+  const full = new Uint8Array(24 + box.length); full.set(nonce); full.set(box, 24);
+  return 'e2e:' + nacl.util.encodeBase64(full);
+}
+function e2eDec(theirPubB64, boxB64) {
+  if (!boxB64 || !boxB64.startsWith('e2e:')) return boxB64; // не наш формат
+  if (!myKeys || !theirPubB64) return null;
+  try {
+    const full = nacl.util.decodeBase64(boxB64.slice(4));
+    const m = nacl.box.open(full.slice(24), full.slice(0, 24), nacl.util.decodeBase64(theirPubB64), myKeys.secretKey);
+    return m ? nacl.util.encodeUTF8(m) : null;
+  } catch { return null; }
+}
+function e2eEncBytes(theirPubB64, bytes) { // Uint8Array → строка-блоб
+  const nonce = nacl.randomBytes(24);
+  const box = nacl.box(bytes, nonce, nacl.util.decodeBase64(theirPubB64), myKeys.secretKey);
+  const full = new Uint8Array(24 + box.length); full.set(nonce); full.set(box, 24);
+  return 'e2e:' + nacl.util.encodeBase64(full);
+}
+function e2eDecBytes(theirPubB64, blobStr) { // строка-блоб → Uint8Array | null
+  if (!blobStr.startsWith('e2e:')) return null;
+  try {
+    const full = nacl.util.decodeBase64(blobStr.slice(4));
+    return nacl.box.open(full.slice(24), full.slice(0, 24), nacl.util.decodeBase64(theirPubB64), myKeys.secretKey);
+  } catch { return null; }
+}
+
+// ── Групповой E2E: конверт (копия шифра каждому участнику) ────────────────────
+const convParts = {};   // convId → [{id, publicKey}] участники (без себя)
+const fileKeys = {};    // key64 вложения → { k: base64-ключ, name }
+function myPubB64() { return nacl.util.encodeBase64(myKeys.publicKey); }
+// Зашифровать payload каждому участнику (включая себя) его публичным ключом.
+function encEnvelope(convId, payloadStr) {
+  if (!myKeys) return payloadStr;
+  const recips = [...(convParts[convId] || []), { id: me.id, publicKey: myPubB64() }];
+  const e = {}; let any = false;
+  for (const r of recips) { if (r.publicKey) { e[r.id] = e2eEnc(r.publicKey, payloadStr); any = true; } }
+  return any ? JSON.stringify({ g: 1, e }) : payloadStr;
+}
+// Расшифровать конверт: своя копия + публичный ключ отправителя.
+function decEnvelope(senderId, body) {
+  if (!body) return body;
+  if (body[0] !== '{') return e2eDec(convOtherPub[activeId], body); // легаси 1-на-1 / открытый текст
+  let obj; try { obj = JSON.parse(body); } catch { return body; }
+  if (!obj || !obj.e) return body;
+  const mine = obj.e[me.id];
+  if (!mine) return null; // нет копии для нас
+  const senderPub = senderId === me.id ? myPubB64() : userPub[senderId];
+  return e2eDec(senderPub, mine);
+}
+// Файлы (гибрид): случайный ключ K шифрует файл один раз; K кладём в payload конверта.
+function secretboxEnc(bytes) {
+  const key = nacl.randomBytes(32), nonce = nacl.randomBytes(24);
+  const box = nacl.secretbox(bytes, nonce, key);
+  const full = new Uint8Array(24 + box.length); full.set(nonce); full.set(box, 24);
+  return { blob: full, keyB64: nacl.util.encodeBase64(key) };
+}
+function secretboxDec(blob, keyB64) {
+  try { return nacl.secretbox.open(blob.slice(24), blob.slice(0, 24), nacl.util.decodeBase64(keyB64)); }
+  catch { return null; }
+}
+function convEncryptable(id) {
+  const ps = convParts[id] || [];
+  return ps.length > 0 && ps.every(p => p.publicKey);
+}
+
+function api(path) { return apiBase.replace(/\/$/, '') + '/api/v1/messenger' + path; }
+async function call(path, opts = {}) {
+  const headers = opts.headers || {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch(api(path), { ...opts, headers });
+  if (res.status === 401 || res.status === 403) { logout(); throw new Error('Сессия завершена'); }
+  const ct = res.headers.get('content-type') || '';
+  const body = ct.includes('json') ? await res.json() : await res.text();
+  if (!res.ok) throw new Error((body && body.message) || ('Ошибка ' + res.status));
+  return body;
+}
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmt(t) { const d = new Date(t); return d.toLocaleString('ru', { hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit' }); }
+
+// ── Экран входа ─────────────────────────────────────────────────────────────
+function setTab(t) {
+  document.getElementById('tabLogin').classList.toggle('active', t === 'login');
+  document.getElementById('tabReg').classList.toggle('active', t === 'reg');
+  document.getElementById('paneLogin').classList.toggle('hidden', t !== 'login');
+  document.getElementById('paneReg').classList.toggle('hidden', t !== 'reg');
+  document.getElementById('authErr').textContent = '';
+}
+function saveApiBase() {
+  const v = document.getElementById('apiBase').value.trim();
+  if (v) { apiBase = v; LS.setItem('msg_api', v); }
+}
+async function doLogin() {
+  saveApiBase();
+  const err = document.getElementById('authErr'); err.textContent = '';
+  try {
+    const r = await call('/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messengerId: liKey.value.trim(), password: liPass.value }),
+    });
+    token = r.accessToken; me = r.user;
+    LS.setItem('msg_token', token); LS.setItem('msg_me', JSON.stringify(me));
+    enterApp();
+  } catch (e) { err.textContent = e.message; }
+}
+async function doRegister() {
+  saveApiBase();
+  const err = document.getElementById('authErr'); err.textContent = '';
+  try {
+    await call('/register', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messengerId: rgKey.value.trim(), displayName: rgName.value.trim(),
+        password: rgPass.value, recoveryEmail: rgEmail.value.trim() || undefined,
+      }),
+    });
+    // Автовход после регистрации.
+    liKey.value = rgKey.value; liPass.value = rgPass.value;
+    setTab('login'); await doLogin();
+  } catch (e) { err.textContent = e.message; }
+}
+function logout() {
+  token = ''; me = null; activeId = null;
+  LS.removeItem('msg_token'); LS.removeItem('msg_me');
+  if (pollTimer) clearInterval(pollTimer);
+  document.getElementById('app').classList.add('hidden');
+  document.getElementById('auth').classList.remove('hidden');
+}
+
+// ── Главный экран ───────────────────────────────────────────────────────────
+function enterApp() {
+  document.getElementById('auth').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  document.getElementById('meName').textContent = me?.displayName || me?.messengerId || 'Я';
+  // E2E: ключи (генерим при первом входе) + публикуем публичный на сервер.
+  const pub = e2eLoadKeys(me.id);
+  call('/chat/keys', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ publicKey: pub }) }).catch(() => {});
+  loadConvs();
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => { loadConvs(); if (activeId) loadMsgs(activeId, false); }, 6000);
+}
+async function loadConvs() {
+  try {
+    convs = (await call('/chat/conversations')).items;
+    for (const c of convs) {
+      const others = c.participants || [];
+      convParts[c.id] = others.map(o => ({ id: o.id, publicKey: o.publicKey }));
+      convOtherPub[c.id] = others[0]?.publicKey; // легаси 1-на-1
+      for (const o of others) if (o.publicKey) userPub[o.id] = o.publicKey;
+    }
+    renderConvs();
+  } catch {}
+}
+// Превью последнего сообщения для списка (без сырого шифр-конверта).
+function previewText(c) {
+  if (!c.lastMessage) return 'Нет сообщений';
+  const b = c.lastMessage.body || '';
+  if (b[0] === '{') {                       // конверт: дешифруется без привязки к активному диалогу
+    const p = decEnvelope(c.lastMessage.senderId, b);
+    if (p === null) return '🔒 Сообщение';
+    try { const o = JSON.parse(p); if (o && o.k) return '📎 ' + (o.name || 'Файл'); } catch {}
+    return p;
+  }
+  if (b.startsWith('e2e:')) return '🔒 Сообщение'; // легаси шифр — без ключа в превью
+  return b;                                  // открытый текст
+}
+function renderConvs() {
+  const q = (document.getElementById('search').value || '').toLowerCase();
+  const box = document.getElementById('convs');
+  box.innerHTML = '';
+  convs.filter(c => c.title.toLowerCase().includes(q)).forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'conv' + (c.id === activeId ? ' active' : '');
+    div.onclick = () => openConv(c.id);
+    div.innerHTML = `<div><div class="t">${esc(c.title)}</div>
+      <div class="l">${esc(previewText(c))}</div></div>
+      ${c.unread ? `<span class="badge">${c.unread}</span>` : ''}`;
+    box.appendChild(div);
+  });
+}
+async function openConv(id) {
+  activeId = id;
+  const c = convs.find(x => x.id === id);
+  document.getElementById('empty').classList.add('hidden');
+  document.getElementById('chat').classList.remove('hidden');
+  const enc = convEncryptable(id);
+  const isGroup = c && c.isGroup;
+  document.getElementById('mhead').textContent =
+    (c ? c.title : 'Диалог')
+    + (isGroup ? ` · группа (${(convParts[id]||[]).length + 1})` : '')
+    + (enc ? '  🔒 зашифровано' : '  ⚠ есть участник без ключа');
+  renderConvs();
+  await loadMsgs(id, true);
+}
+async function loadMsgs(id, markRead) {
+  try {
+    const items = (await call('/chat/conversations/' + id + '/messages')).items;
+    if (id !== activeId) return;
+    const box = document.getElementById('msgs');
+    box.innerHTML = '';
+    items.slice().reverse().forEach(m => {
+      const mine = m.senderId === me.id;
+      const div = document.createElement('div');
+      div.className = 'msg ' + (mine ? 'me' : 'you');
+      // E2E: расшифровываем конверт (своя копия + публичный ключ отправителя).
+      const payload = decEnvelope(m.senderId, m.body);
+      let html;
+      if (m.attachmentUrl) {
+        const k64 = encodeURIComponent(btoa(unescape(encodeURIComponent(m.attachmentUrl))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''));
+        let name = 'файл';
+        if (payload !== null) {
+          try { const o = JSON.parse(payload); if (o && o.k) { name = o.name || 'файл'; fileKeys[k64] = { k: o.k, name }; } else { name = payload.replace(/^📎 /, ''); } }
+          catch { name = payload.replace(/^📎 /, ''); }
+        }
+        // Ссылку даём только если смогли расшифровать (иначе по клику сохранился бы шифр).
+        html = (payload === null ? '🔒 [не удалось расшифровать]' : '📎 ' + esc(name))
+             + (payload === null ? '' : ` <a href="#" onclick="dl('${k64}');return false;">Скачать</a>`);
+      } else {
+        html = esc(payload === null ? '🔒 [не удалось расшифровать]' : payload);
+      }
+      div.innerHTML = html + `<span class="meta">${fmt(m.createdAt)}</span>`;
+      box.appendChild(div);
+    });
+    box.scrollTop = box.scrollHeight;
+    if (markRead) { try { await call('/chat/conversations/' + id + '/read', { method:'POST' }); loadConvs(); } catch {} }
+  } catch {}
+}
+async function sendMsg() {
+  const inp = document.getElementById('msgInput');
+  const body = inp.value.trim();
+  if (!body || !activeId) return;
+  // UX «нет ключа»: если у кого-то из участников ещё нет ключа — он не сможет
+  // прочитать (его копии в конверте не будет); предупреждаем.
+  if (myKeys && !convEncryptable(activeId)) {
+    if (!confirm('У части участников ещё нет ключа шифрования (не заходили).\nОни не смогут прочитать это сообщение. Отправить?')) return;
+  }
+  inp.value = '';
+  try {
+    await call('/chat/conversations/' + activeId + '/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: encEnvelope(activeId, body) }),
+    });
+    loadMsgs(activeId, false); loadConvs();
+  } catch (e) { alert(e.message); }
+}
+async function sendFile() {
+  const f = document.getElementById('file').files[0];
+  if (!f || !activeId) return;
+  if (myKeys && !convEncryptable(activeId)) {
+    if (!confirm('У части участников ещё нет ключа.\nОни не смогут открыть файл. Отправить?')) {
+      document.getElementById('file').value = ''; return;
+    }
+  }
+  try {
+    // E2E файла (гибрид): шифруем содержимое случайным ключом K один раз, заливаем
+    // шифроблоб; K кладём в конверт сообщения (своя копия каждому участнику).
+    const buf = new Uint8Array(await f.arrayBuffer());
+    const { blob, keyB64 } = secretboxEnc(buf);
+    const encFile = new File([blob], f.name, { type: f.type || 'application/octet-stream' });
+    const fd = new FormData(); fd.append('file', encFile);
+    const up = await call('/chat/conversations/' + activeId + '/attachments', { method:'POST', body: fd });
+    const payload = JSON.stringify({ name: f.name, k: keyB64 });
+    await call('/chat/conversations/' + activeId + '/messages', {
+      method:'POST', headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ body: encEnvelope(activeId, payload), attachmentUrl: up.key }),
+    });
+    document.getElementById('file').value = '';
+    loadMsgs(activeId, false); loadConvs();
+  } catch (e) { alert(e.message); }
+}
+async function dl(key64) {
+  try {
+    const res = await fetch(api('/chat/attachments/download?key64=' + key64), { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!res.ok) throw new Error('Не удалось скачать');
+    const buf = new Uint8Array(await res.arrayBuffer());
+    const fk = fileKeys[key64];
+    let outBlob, name;
+    if (fk && fk.k) {                       // новый формат: гибрид (secretbox по ключу K)
+      const dec = secretboxDec(buf, fk.k);
+      if (!dec) throw new Error('Не удалось расшифровать файл');
+      outBlob = new Blob([dec]); name = fk.name;
+    } else {                                // легаси: e2e: блоб (старый 1-на-1) или открытый
+      const text = new TextDecoder().decode(buf);
+      if (text.startsWith('e2e:')) {
+        const dec = e2eDecBytes(convOtherPub[activeId], text);
+        if (!dec) throw new Error('Не удалось расшифровать файл');
+        outBlob = new Blob([dec]);
+      } else outBlob = new Blob([buf]);
+    }
+    const cd = res.headers.get('content-disposition') || '';
+    name = name || (cd.match(/filename="?([^"]+)"?/) || [])[1] || 'file';
+    const a = document.createElement('a'); a.href = URL.createObjectURL(outBlob); a.download = name; a.click();
+  } catch (e) { alert(e.message); }
+}
+
+// ── Поиск собеседников ──────────────────────────────────────────────────────
+let groupMode = false;
+const groupSel = new Map(); // userId → name (выбранные для группы)
+function showModal(group) {
+  groupMode = group; groupSel.clear();
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('modalTitle').textContent = group ? 'Новая группа' : 'Новый диалог';
+  document.getElementById('groupName').classList.toggle('hidden', !group);
+  document.getElementById('createGroupBtn').classList.toggle('hidden', !group);
+  document.getElementById('groupName').value = '';
+  document.getElementById('searchUser').value = '';
+  document.getElementById('userList').innerHTML = '';
+  document.getElementById('searchUser').focus();
+}
+function openSearch() { showModal(false); }
+function openGroup() { showModal(true); }
+function closeSearch() { document.getElementById('modal').classList.add('hidden'); }
+let searchT = null;
+function searchUsers() {
+  clearTimeout(searchT);
+  searchT = setTimeout(async () => {
+    try {
+      const q = document.getElementById('searchUser').value.trim();
+      const items = (await call('/chat/contacts?q=' + encodeURIComponent(q))).items;
+      const box = document.getElementById('userList'); box.innerHTML = '';
+      items.forEach(u => {
+        const d = document.createElement('div'); d.className = 'urow';
+        const checked = groupSel.has(u.id);
+        d.onclick = () => groupMode ? toggleSel(u, d) : startConv(u.id);
+        d.innerHTML = `<span>${groupMode ? (checked ? '☑ ' : '☐ ') : ''}${esc(u.name)}</span><span class="id">${esc(u.messengerId)}</span>`;
+        box.appendChild(d);
+      });
+      if (!items.length) box.innerHTML = '<div style="color:var(--muted);padding:8px;">Никого не найдено</div>';
+    } catch (e) {}
+  }, 250);
+}
+function toggleSel(u, row) {
+  if (groupSel.has(u.id)) groupSel.delete(u.id); else groupSel.set(u.id, u.name);
+  const checked = groupSel.has(u.id);
+  row.innerHTML = `<span>${checked ? '☑ ' : '☐ '}${esc(u.name)}</span><span class="id">${esc(u.messengerId)}</span>`;
+  document.getElementById('createGroupBtn').textContent = `Создать группу (${groupSel.size})`;
+}
+async function startConv(userId) {
+  try {
+    const r = await call('/chat/conversations', {
+      method:'POST', headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ participantId: userId }),
+    });
+    closeSearch(); await loadConvs(); openConv(r.id);
+  } catch (e) { alert(e.message); }
+}
+async function createGroupConv() {
+  const title = document.getElementById('groupName').value.trim();
+  if (!title) { alert('Введите название группы'); return; }
+  if (groupSel.size === 0) { alert('Выберите хотя бы одного участника'); return; }
+  try {
+    const r = await call('/chat/groups', {
+      method:'POST', headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ title, participantIds: [...groupSel.keys()] }),
+    });
+    closeSearch(); await loadConvs(); openConv(r.id);
+  } catch (e) { alert(e.message); }
+}
+
+// ── Старт ───────────────────────────────────────────────────────────────────
+document.getElementById('apiBase').value = (apiBase === location.origin ? '' : apiBase);
+if (token && me) enterApp();
+</script>
+</body>
+</html>

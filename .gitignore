@@ -1,0 +1,32 @@
+# Node
+node_modules/
+dist/
+*.log
+
+# Prisma generated client
+server/src/generated/
+.prisma/
+
+# Файловое хранилище вложений
+uploads/
+
+# Окружение и секреты
+.env
+*.env.local
+
+# C++/Qt сборка
+build/
+*.obj
+*.o
+*.exe
+CMakeCache.txt
+CMakeFiles/
+
+# Установщики
+установщики/
+*.Setup.exe
+
+# IDE
+.vscode/
+.idea/
+*.user

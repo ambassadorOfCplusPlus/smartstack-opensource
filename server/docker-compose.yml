@@ -1,0 +1,43 @@
+# Smartstack Messenger — Postgres + сервер.
+# Веб-клиент (web/index.html) статичен: откройте его в браузере и укажите адрес
+# этого сервера, либо раздайте папку web/ любым статик-сервером.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: messenger
+      POSTGRES_PASSWORD: messenger
+      POSTGRES_DB: messenger
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U messenger"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://messenger:messenger@postgres:5432/messenger?schema=public
+      JWT_SECRET: change-me-to-a-long-random-string
+      ADMIN_TOKEN: change-me-admin-token
+      JWT_ACCESS_TTL: 30d
+      FILE_STORAGE: local
+      LOCAL_STORAGE_DIR: /app/uploads
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - uploads:/app/uploads
+
+volumes:
+  pgdata:
+  uploads:
