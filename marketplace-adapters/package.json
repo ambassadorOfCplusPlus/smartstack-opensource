@@ -1,0 +1,40 @@
+{
+  "name": "@smartstack/marketplace-adapters",
+  "version": "0.1.0",
+  "description": "Dependency-light TypeScript FBS adapters for Wildberries, Ozon, Yandex.Market and Sber Megamarket — push stocks & prices, import orders. HTTP client is injected via FetchLike.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "marketplace",
+    "wildberries",
+    "ozon",
+    "yandex-market",
+    "sber-megamarket",
+    "fbs",
+    "adapter",
+    "stocks",
+    "orders"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "@smartstack/installer-glue",
+  "version": "0.1.0",
+  "description": "Executable gluing: append a config/manifest tail to a prebuilt base .exe (or .apk) to personalize it without recompiling.",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "dist/glue.js",
+  "types": "dist/glue.d.ts",
+  "bin": {
+    "installer-glue": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "installer",
+    "exe",
+    "apk",
+    "gluing",
+    "manifest",
+    "crc32",
+    "self-extracting"
+  ],
+  "engines": {
+    "node": ">=20.15.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

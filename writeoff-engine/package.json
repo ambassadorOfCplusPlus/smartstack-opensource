@@ -1,0 +1,33 @@
+{
+  "name": "@smartstack/writeoff-engine",
+  "version": "0.1.0",
+  "description": "Storage-agnostic batch (lot) inventory write-off engine: FIFO, LIFO, weighted average. Bring your own storage via the BatchStore interface.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "inventory",
+    "warehouse",
+    "fifo",
+    "lifo",
+    "weighted-average",
+    "batch",
+    "writeoff",
+    "cost-of-goods"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
