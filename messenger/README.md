@@ -82,13 +82,13 @@ the messenger feature, fully decoupled.
 >   `…/sealed-attachments`, поле `post_secret`, `type`, nullable `sender_id`,
 >   отключённый IP-лог; миграция `0002_sealed_sender`).
 > - **Веб-клиент** (`web/index.html`) — **готов**: sealed-отправка, trial-decrypt
->   отправителя, padding, sealed-файлы, отпечатки ключей (кнопка 🔐), локальный
->   подсчёт непрочитанного (без read-receipt).
-> - **Qt-клиент** (`desktop/`) — **порт сделан и СОБРАН** (Release, MSVC + Qt 6.5.3 +
->   libsodium, E2E ON): padPayload/unpad, decMessage trial-decrypt, `ApiClient::postSealed`
->   без auth-заголовка, отпечатки + кнопка 🔐, без read-receipt. Sealed-вложения в Qt
->   пока на legacy authed-пути (текст уже sealed).
-> - **Реакции** в вебе — ⏳ (нужен UI-пикер). Сервер уже принимает `type='react'`.
+>   отправителя, padding, sealed-файлы, **реакции-смайлики** (sealed `type='react'`,
+>   пикер + чипы), отпечатки ключей (кнопка 🔐), локальный подсчёт непрочитанного
+>   (без read-receipt). Крипто (tweetnacl) — **self-hosted** (`vendor/`, SRI), не с CDN.
+> - **Qt-клиент** (`desktop/`) — **готов и СОБРАН** (Release, MSVC + Qt 6.5.3 +
+>   libsodium, E2E ON): padPayload/unpad, decMessage trial-decrypt, `postSealed` без
+>   auth-заголовка, **sealed-вложения** (x-post-token / x-att-key), отпечатки + кнопка
+>   🔐, без read-receipt.
 >
 > Legacy authed-роуты (`…/messages`) сохранены → старые клиенты работают без изменений.
 

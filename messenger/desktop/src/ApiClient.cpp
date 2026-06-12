@@ -84,6 +84,59 @@ void ApiClient::uploadFile(const QString& path, const QString& filePath, JsonCb 
     });
 }
 
+void ApiClient::uploadFileSealed(const QString& path, const QString& filePath,
+                                 const QString& postToken, JsonCb cb) {
+    auto* mp = new QHttpMultiPart(QHttpMultiPart::FormDataType);
+    auto* file = new QFile(filePath);
+    if (!file->open(QIODevice::ReadOnly)) {
+        delete file; delete mp;
+        if (cb) cb(false, QJsonObject{{"message", "Не удалось открыть файл"}}, 0);
+        return;
+    }
+    QHttpPart part;
+    part.setHeader(QNetworkRequest::ContentDispositionHeader,
+                   QVariant(QString("form-data; name=\"file\"; filename=\"%1\"")
+                                .arg(QFileInfo(filePath).fileName())));
+    part.setBodyDevice(file);
+    file->setParent(mp);
+    mp->append(part);
+
+    QNetworkRequest req{ QUrl(url(path)) };
+    req.setRawHeader("x-post-token", postToken.toUtf8());  // личность НЕ раскрываем
+    QNetworkReply* reply = m_nam->post(req, mp);
+    mp->setParent(reply);
+    QObject::connect(reply, &QNetworkReply::finished, this, [reply, cb]() {
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray data = reply->readAll();
+        reply->deleteLater();
+        const QJsonDocument doc = QJsonDocument::fromJson(data);
+        if (cb) cb(status >= 200 && status < 300, doc.object(), status);
+    });
+}
+
+void ApiClient::downloadBinSealed(const QString& path, const QString& attKey,
+                                  const QString& postToken, BinCb cb) {
+    QNetworkRequest req{ QUrl(url(path)) };
+    req.setRawHeader("x-att-key", attKey.toUtf8());      // ключ в заголовке, не в URL
+    req.setRawHeader("x-post-token", postToken.toUtf8());
+    QNetworkReply* reply = m_nam->get(req);
+    QObject::connect(reply, &QNetworkReply::finished, this, [reply, cb]() {
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray data = reply->readAll();
+        QString filename;
+        const QByteArray cd = reply->rawHeader("Content-Disposition");
+        const int idx = cd.indexOf("filename=");
+        if (idx >= 0) {
+            QByteArray rest = cd.mid(idx + 9);
+            const int semi = rest.indexOf(';');
+            if (semi >= 0) rest = rest.left(semi);
+            filename = QString::fromUtf8(rest).remove('"').trimmed();
+        }
+        reply->deleteLater();
+        if (cb) cb(status >= 200 && status < 300, data, filename);
+    });
+}
+
 void ApiClient::downloadBin(const QString& path, BinCb cb) {
     QNetworkRequest req{ QUrl(url(path)) };
     if (!m_token.isEmpty()) req.setRawHeader("Authorization", "Bearer " + m_token.toUtf8());

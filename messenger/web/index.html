@@ -5,9 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SmartStock Мессенджер</title>
 <!-- E2E: tweetnacl реализует NaCl box (X25519+XSalsa20-Poly1305) — совместимо с
-     libsodium crypto_box в Qt-клиенте. Формат на проводе: e2e:base64(nonce+box). -->
-<script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tweetnacl-util@0.15.1/nacl-util.min.js"></script>
+     libsodium crypto_box в Qt-клиенте. Формат на проводе: e2e:base64(nonce+box).
+     Крипто-библиотека ХОСТИТСЯ ЛОКАЛЬНО (vendor/), не с CDN — иначе компрометация
+     CDN могла бы подменить шифрование. integrity (SRI) — доп. контроль целостности. -->
+<script src="vendor/nacl.min.js"
+        integrity="sha384-LMUiUHpaYNGZFzWFRjsADnCSqae1Mk5llcUOHOLDhCxkyF2cdsWAueTZAzV+swW/"
+        crossorigin="anonymous"></script>
+<script src="vendor/nacl-util.min.js"
+        integrity="sha384-qpU3wxGxaAPcz02pOLeZTv5B0rNzsh3CETsUqdHxRBP70bO0kHoBopr+f9AcGj04"
+        crossorigin="anonymous"></script>
 <style>
   :root { --bg:#0b141a; --panel:#111b21; --panel2:#202c33; --accent:#00a884;
           --text:#e9edef; --muted:#8696a0; --bubble-me:#005c4b; --bubble-you:#202c33; }
@@ -51,6 +57,15 @@
   .msg.you { align-self:flex-start; background:var(--bubble-you); }
   .msg .meta { display:block; color:var(--muted); font-size:11px; margin-top:3px; }
   .msg a { color:#8fd3ff; }
+  /* Реакции: чипы под пузырём + кнопка добавления, появляющаяся при наведении. */
+  .reactrow { display:flex; gap:4px; flex-wrap:wrap; align-items:center; margin-top:3px; }
+  .chip { background:var(--panel2); border:1px solid #2a3942; border-radius:10px; padding:0 6px; font-size:12px; cursor:pointer; line-height:18px; }
+  .chip.mine { border-color:var(--accent); }
+  .addreact { opacity:0; background:none; border:0; cursor:pointer; font-size:13px; color:var(--muted); transition:opacity .15s; }
+  .msg:hover .addreact { opacity:1; }
+  #picker { position:fixed; z-index:60; background:var(--panel); border:1px solid #2a3942; border-radius:10px; padding:4px 6px; display:flex; gap:4px; box-shadow:0 4px 16px rgba(0,0,0,.5); }
+  #picker span { cursor:pointer; font-size:20px; padding:2px; }
+  #picker span:hover { transform:scale(1.2); }
   #composer { display:flex; gap:8px; padding:12px; border-top:1px solid #2a3942; background:var(--panel); }
   #composer input[type=text] { margin:0; }
   #empty { flex:1; display:flex; align-items:center; justify-content:center; color:var(--muted); }
@@ -138,6 +153,17 @@
     <button id="createGroupBtn" class="btn hidden" onclick="createGroupConv()">Создать группу</button>
     <button class="btn sec" onclick="closeSearch()">Закрыть</button>
   </div>
+</div>
+
+<!-- ── Пикер реакций (позиционируется по клику) ────────────────────────────── -->
+<div id="picker" class="hidden">
+  <span onclick="chooseReact('👍')">👍</span>
+  <span onclick="chooseReact('❤️')">❤️</span>
+  <span onclick="chooseReact('😂')">😂</span>
+  <span onclick="chooseReact('😮')">😮</span>
+  <span onclick="chooseReact('😢')">😢</span>
+  <span onclick="chooseReact('🔥')">🔥</span>
+  <span onclick="chooseReact('✅')">✅</span>
 </div>
 
 <script>
@@ -330,6 +356,55 @@ async function sealedPost(convId, payload, attachmentUrl, type) {
   if (!res.ok) throw new Error('Ошибка отправки ' + res.status);
 }
 
+// ── Реакции-смайлики (sealed-сообщения type='react') ─────────────────────────
+let pickMsgId = null;
+async function react(targetMsgId, emoji) {
+  // Реакция — sealed-сообщение type='react' с E2E-payload {m:targetId, e:emoji}.
+  // Сервер не видит ни автора, ни эмодзи, ни цель. Каждое — toggle; клиент
+  // реплеит их и считает состояние.
+  if (!convPostToken[activeId] || !myKeys) return;
+  const env = encEnvelope(activeId, JSON.stringify({ m: targetMsgId, e: emoji }));
+  try { await sealedPost(activeId, env, undefined, 'react'); loadMsgs(activeId, false); } catch {}
+}
+// Состояние реакций из sealed-сообщений type='react' (replay toggle):
+// → { targetMsgId: { emoji: Set(userId) } }
+function buildReactions(items) {
+  const state = {};
+  items.filter(m => m.type === 'react')
+       .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+       .forEach(m => {
+    const dm = decMessage(m);
+    if (!dm.payload) return;
+    let r; try { r = JSON.parse(dm.payload); } catch { return; }
+    if (!r || !r.m || !r.e) return;
+    const st = state[r.m] || (state[r.m] = {});
+    const set = st[r.e] || (st[r.e] = new Set());
+    const u = dm.sender || '?';
+    if (set.has(u)) set.delete(u); else set.add(u);
+    if (!set.size) delete st[r.e];
+  });
+  return state;
+}
+function pickReact(ev, msgId) {
+  ev.stopPropagation();
+  pickMsgId = msgId;
+  const p = document.getElementById('picker');
+  const r = ev.target.getBoundingClientRect();
+  p.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 230)) + 'px';
+  p.style.top = (r.top - 46) + 'px';
+  p.classList.remove('hidden');
+}
+function chooseReact(emoji) {
+  document.getElementById('picker').classList.add('hidden');
+  if (pickMsgId) react(pickMsgId, emoji);
+}
+// Клик мимо пикера — закрыть (pickReact делает stopPropagation, чтобы открытие
+// не закрылось этим же кликом).
+window.addEventListener('click', () => {
+  const p = document.getElementById('picker');
+  if (p) p.classList.add('hidden');
+});
+
 function api(path) { return apiBase.replace(/\/$/, '') + '/api/v1/messenger' + path; }
 async function call(path, opts = {}) {
   const headers = opts.headers || {};
@@ -469,7 +544,8 @@ async function loadMsgs(id, markRead) {
     if (id !== activeId) return;
     const box = document.getElementById('msgs');
     box.innerHTML = '';
-    // Реакции (type='react') не рисуем как сообщения (UI реакций — отдельная задача).
+    const reactions = buildReactions(items); // состояние реакций по targetMsgId
+    // Реакции (type='react') не рисуем как сообщения — только обычные.
     items.filter(m => (m.type || 'msg') === 'msg').slice().reverse().forEach(m => {
       // sealed-sender: senderId=null → автора и текст определяем trial-decrypt'ом.
       const dm = decMessage(m);
@@ -492,6 +568,25 @@ async function loadMsgs(id, markRead) {
         html = esc(payload === null ? '🔒 [не удалось расшифровать]' : payload);
       }
       div.innerHTML = html + `<span class="meta">${fmt(m.createdAt)}</span>`;
+      // Реакции: чипы (с подсветкой своих) + кнопка добавления (видна при наведении).
+      const rr = document.createElement('div');
+      rr.className = 'reactrow';
+      const rmap = reactions[m.id] || {};
+      for (const [emoji, users] of Object.entries(rmap)) {
+        const chip = document.createElement('span');
+        chip.className = 'chip' + (users.has(me.id) ? ' mine' : '');
+        chip.textContent = emoji + ' ' + users.size;
+        chip.title = 'Переключить реакцию';
+        chip.onclick = () => react(m.id, emoji);
+        rr.appendChild(chip);
+      }
+      const add = document.createElement('button');
+      add.className = 'addreact';
+      add.textContent = '☺+';
+      add.title = 'Добавить реакцию';
+      add.onclick = (e) => pickReact(e, m.id);
+      rr.appendChild(add);
+      div.appendChild(rr);
       box.appendChild(div);
     });
     box.scrollTop = box.scrollHeight;

@@ -31,6 +31,12 @@ public:
     void postSealed(const QString& path, const QJsonObject& body, JsonCb cb);
     void uploadFile(const QString& path, const QString& filePath, JsonCb cb);
     void downloadBin(const QString& path, BinCb cb);
+    // Sealed-вложения: без Authorization; авторизация секретом диалога в заголовке
+    // x-post-token (загрузка) / x-att-key + x-post-token (скачивание, ключ не в URL).
+    void uploadFileSealed(const QString& path, const QString& filePath,
+                          const QString& postToken, JsonCb cb);
+    void downloadBinSealed(const QString& path, const QString& attKey,
+                           const QString& postToken, BinCb cb);
 
 private:
     QNetworkAccessManager* m_nam;

@@ -403,18 +403,26 @@ void MainWindow::onAttach() {
     if (tf.open(QIODevice::WriteOnly)) { tf.write(blob); tf.close(); }
     const QString convId = m_activeConv;
     const QString name = QFileInfo(path).fileName();
-    m_api->uploadFile("/chat/conversations/" + convId + "/attachments", tmp,
-                      [this, convId, name, keyB64](bool ok, const QJsonValue& v, int) {
+    const QString tok = m_postToken.value(convId);
+    // После загрузки — отправляем сообщение с ключом файла (sealed, если есть токен).
+    auto afterUpload = [this, convId, name, keyB64, tok](bool ok, const QJsonValue& v, int) {
         QFile::remove(QDir::temp().filePath("ssm_up_" + name));
         if (!ok) { QMessageBox::warning(this, "Файл", v.toObject().value("message").toString("Не удалось загрузить")); return; }
         const QString key = v.toObject().value("key").toString();
         const QJsonObject payload{ {"name", name}, {"k", keyB64} };
-        const QString body = encEnvelope(convId,
-            QJsonDocument(payload).toJson(QJsonDocument::Compact));
-        m_api->post("/chat/conversations/" + convId + "/messages",
-                    QJsonObject{ {"body", body}, {"attachmentUrl", key} },
-                    [this, convId](bool, const QJsonValue&, int) { loadMessages(convId, false); });
-    });
+        const QString body = encEnvelope(convId, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+        auto done = [this, convId](bool, const QJsonValue&, int) { loadMessages(convId, false); };
+        if (!tok.isEmpty())
+            m_api->postSealed("/chat/conversations/" + convId + "/sealed-messages",
+                              QJsonObject{ {"postToken", tok}, {"body", body}, {"attachmentUrl", key} }, done);
+        else
+            m_api->post("/chat/conversations/" + convId + "/messages",
+                        QJsonObject{ {"body", body}, {"attachmentUrl", key} }, done);
+    };
+    if (!tok.isEmpty())
+        m_api->uploadFileSealed("/chat/conversations/" + convId + "/sealed-attachments", tmp, tok, afterUpload);
+    else
+        m_api->uploadFile("/chat/conversations/" + convId + "/attachments", tmp, afterUpload);
 }
 
 void MainWindow::onAnchor(const QUrl& link) {
@@ -423,8 +431,8 @@ void MainWindow::onAnchor(const QUrl& link) {
     const QString key64 = s.mid(3);
     const QString fileKey = m_fileKeyB64.value(key64);
     const QString hintName = m_fileName.value(key64);
-    m_api->downloadBin("/chat/attachments/download?key64=" + key64,
-                       [this, fileKey, hintName](bool ok, const QByteArray& data, const QString& filename) {
+    const QString tok = m_postToken.value(m_activeConv);
+    auto onData = [this, fileKey, hintName](bool ok, const QByteArray& data, const QString& filename) {
         if (!ok) { QMessageBox::warning(this, "Файл", "Не удалось скачать"); return; }
         QByteArray out;
         if (!fileKey.isEmpty()) {                     // новый формат: гибрид (secretbox по K)
@@ -440,7 +448,17 @@ void MainWindow::onAnchor(const QUrl& link) {
         if (save.isEmpty()) return;
         QFile o(save);
         if (o.open(QIODevice::WriteOnly)) { o.write(out); o.close(); QMessageBox::information(this, "Файл", "Сохранено"); }
-    });
+    };
+    // sealed: ключ и секрет диалога — в заголовках (не в URL). Иначе legacy authed.
+    if (!tok.isEmpty()) {
+        // key64 (base64url) → сырой ключ хранилища для заголовка x-att-key.
+        const QByteArray rawKey = QByteArray::fromBase64(
+            key64.toUtf8(), QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+        m_api->downloadBinSealed("/chat/sealed-attachments/download",
+                                 QString::fromUtf8(rawKey), tok, onData);
+    } else {
+        m_api->downloadBin("/chat/attachments/download?key64=" + key64, onData);
+    }
 }
 
 void MainWindow::onNewDialog() {
