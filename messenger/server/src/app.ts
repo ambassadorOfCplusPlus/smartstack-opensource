@@ -28,7 +28,17 @@ async function ensureInstanceOrg(prisma: PrismaClient): Promise<string> {
 }
 
 export async function buildApp(prisma = new PrismaClient()): Promise<BuildAppResult> {
-  const app = Fastify({ logger: true });
+  // Приватность: НЕ логируем IP клиента и заголовки (в дефолтном req-сериализаторе
+  // Fastify оседал remoteAddress). Оставляем только метод и путь.
+  const app = Fastify({
+    logger: {
+      serializers: {
+        req(req: { method: string; url: string }) {
+          return { method: req.method, url: req.url };
+        },
+      },
+    },
+  });
 
   // JWT — для токенов мессенджера (kind='messenger'). access TTL из env.
   await app.register(jwt, {

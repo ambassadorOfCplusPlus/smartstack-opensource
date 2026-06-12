@@ -105,9 +105,11 @@ blobs are interoperable.
 ## 5. What the server can and cannot see
 
 - **Can see**: public keys, who is in a conversation, message timestamps,
-  ciphertext sizes, attachment blob sizes/filenames-on-disk.
-- **Cannot see**: message plaintext, file plaintext, or any symmetric key — all
-  secret keys and file keys stay on devices; the server only relays ciphertext.
+  ciphertext sizes (mitigated by padding, см. §7.2), attachment blob sizes.
+- **Cannot see**: message plaintext, file plaintext, any symmetric key —
+  all secret/file keys stay on devices; the server only relays ciphertext.
+- **Больше НЕ видит автора каждого сообщения** — с sealed-sender (§7.1) отправка
+  идёт без токена личности, `sender_id` не сохраняется (NULL).
 
 ## 6. Primitive summary
 
@@ -118,3 +120,62 @@ blobs are interoperable.
 | File body          | XSalsa20-Poly1305 (secret key)    | `nacl.secretbox`  | `crypto_secretbox_easy`   |
 | Nonce size         | 24 bytes                          | `nacl.randomBytes`| `randombytes_buf`         |
 | MAC size           | 16 bytes                          | (built in)        | `crypto_box_MACBYTES`     |
+
+## 7. Приватность метаданных (sealed-sender, «вариант 1»)
+
+Сверх E2E-шифрования содержимого мы прячем и часть метаданных. Это реализация
+идеи «3 пакета»: получатель сам определяет, кому адресовано и от кого, пробуя
+расшифровать конверт своим ключом (NaCl box — аутентифицированный).
+
+### 7.1 Sealed-sender — сервер не знает автора
+
+- У диалога есть **общий секрет постинга** (`post_secret`). Участник получает его
+  authed-запросом `GET …/conversations/:id/post-token` (тут личность ещё видна).
+- Отправка идёт на `POST …/conversations/:id/sealed-messages` **без токена
+  личности** — авторизация секретом диалога в теле (`postToken`). Сервер
+  сохраняет сообщение с `sender_id = NULL` → **не знает, кто из участников
+  написал**. Личность отправителя — внутри E2E-payload; её узнаёт только
+  получатель по тому, чьим ключом расшифровался конверт.
+- Секрет сравнивается в постоянном времени (`timingSafeEqual`).
+
+### 7.2 Padding — прячем длину
+
+Текст добивается пробелами до бакетов `[128, 512, 2048, 8192, 32768, 131072]`
+символов (UTF-16 code units — совпадает в JS `String.length` и Qt
+`QString::length`), формат `"P1\n<len>\n<text><пробелы>"`. Сервер видит только
+размер бакета, не реальную длину. Старые сообщения без маркера `P1\n` читаются
+как есть (обратная совместимость).
+
+### 7.3 Реакции и файлы как sealed-сообщения
+
+- **Реакции** — sealed-сообщения с `type='react'` и E2E-payload `{m:targetId,
+  e:emoji}`. Сервер не видит ни эмодзи, ни цель, ни автора; реакции не двигают
+  диалог вверх и не попадают в превью (фильтр `type='msg'`).
+- **Файлы** — гибрид: случайный ключ шифрует файл, ключ заворачивается на каждого
+  получателя. Загрузка/скачивание — sealed (по секрету диалога): заголовки
+  `x-post-token` и `x-att-key`, ключ НЕ в URL → не оседает в логах.
+
+### 7.4 Без read-receipt, без IP
+
+- **Read-receipt убран**: непрочитанное считает КЛИЕНТ (`localRead` в
+  localStorage), сервер не узнаёт факт прочтения. Серверный счётчик `unread` —
+  best-effort (при sealed-отправке автор неизвестен).
+- **IP не логируется**: req-сериализатор оставляет только метод и путь.
+
+### 7.5 Отпечатки ключей (safety numbers)
+
+Защита от MITM-подмены публичного ключа: `SHA-512(pubkey)`, первые 16 байт hex —
+участники сверяют отпечаток вне канала. Web — `keyFingerprint()`/`showSafety()`,
+Qt — `QCryptographicHash::Sha512`.
+
+### Что осталось серверу видно
+
+Состав диалога и время доставки (нужны, чтобы доставить адресату) — убирается
+только mix-сетью/onion (не реализовано; см. «вариант 2» в плане). Это
+осознанный компромисс: мессенджер остаётся быстрым и лёгким.
+
+> **Статус реализации:** серверная часть (sealed-эндпоинты, `post_secret`,
+> `type`, nullable `sender_id`, без IP-логов) — в этом репозитории. Клиентская
+> часть (trial-decrypt, padding, отпечатки в `web/index.html` и Qt) переносится
+> из основного продукта SmartStock — см. roadmap в README. Legacy authed-роуты
+> (`…/messages`) сохранены, поэтому существующие клиенты продолжают работать.

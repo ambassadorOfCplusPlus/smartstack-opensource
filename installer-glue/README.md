@@ -3,6 +3,11 @@
 Склейка персональных установщиков **без перекомпиляции** (executable gluing).
 Personalize a prebuilt executable in milliseconds by appending a config tail — no recompile.
 
+> ⚠️ **Этот приём убран из основного продукта SmartStock** (антивирусы метят
+> overlay как дроппер). Продукт перешёл на sidecar (exe + manifest.json рядом).
+> Почему и на что заменили — **[WHY_REMOVED_FROM_PRODUCT.md](./WHY_REMOVED_FROM_PRODUCT.md)**.
+> Здесь способ сохранён как референс для сценариев без требований к AV-репутации.
+
 ---
 
 ## Зачем это нужно (RU)

@@ -27,6 +27,7 @@
 #include <QUrl>
 #include <QVariant>
 #include <QDateTime>
+#include <QCryptographicHash>
 
 static QString esc(const QString& s) {
     QString r = s;
@@ -80,9 +81,17 @@ void MainWindow::buildUi() {
     row->addWidget(attachBtn);
     row->addWidget(m_input, 1);
     row->addWidget(sendBtn);
-    rv->addWidget(m_title);
+    // Шапка чата: название + кнопка отпечатков ключей (защита от MITM).
+    auto* head = new QHBoxLayout();
+    auto* safetyBtn = new QPushButton("🔐");
+    safetyBtn->setFixedWidth(40);
+    safetyBtn->setToolTip("Отпечатки ключей — защита от подмены (MITM)");
+    head->addWidget(m_title, 1);
+    head->addWidget(safetyBtn);
+    rv->addLayout(head);
     rv->addWidget(m_msgView, 1);
     rv->addLayout(row);
+    connect(safetyBtn, &QPushButton::clicked, this, &MainWindow::showSafety);
 
     split->addWidget(left);
     split->addWidget(right);
@@ -173,11 +182,35 @@ void MainWindow::openConversation(const QString& id) {
         t += QString(" · группа (%1)").arg(m_convMembers.value(id).size() + 1);
     t += enc ? "   🔒 зашифровано" : "   ⚠ есть участник без ключа";
     m_title->setText(t);
+    ensurePostToken(id);   // sealed-sender: получить секрет постинга (для анонимной отправки)
     loadMessages(id, true);
+}
+
+// Padding: добиваем открытый текст ДО шифрования до фиксированных «вёдер», чтобы
+// по длине шифротекста нельзя было оценить размер. Формат "P1\n<len>\n<text>...".
+// Длина — в UTF-16 code units (QString::length == JS String.length) для совместимости
+// с веб-клиентом. Без маркера "P1\n" — старый/открытый payload (не трогаем).
+QString MainWindow::padPayload(const QString& s) const {
+    static const int buckets[] = { 128, 512, 2048, 8192, 32768, 131072 };
+    const QString body = "P1\n" + QString::number(s.length()) + "\n" + s;
+    int target = 0;
+    for (int b : buckets) { if (b >= body.length()) { target = b; break; } }
+    if (target == 0) target = ((body.length() + 131071) / 131072) * 131072;
+    return body + QString(target - body.length(), QChar(' '));
+}
+QString MainWindow::unpadPayload(const QString& s) const {
+    if (!s.startsWith("P1\n")) return s;
+    const int i = s.indexOf('\n', 3);
+    if (i < 0) return s;
+    bool ok = false;
+    const int len = s.mid(3, i - 3).toInt(&ok);
+    if (!ok) return s;
+    return s.mid(i + 1, len);
 }
 
 QString MainWindow::encEnvelope(const QString& convId, const QByteArray& payload) {
     if (!Crypto::available()) return QString::fromUtf8(payload);
+    const QByteArray padded = padPayload(QString::fromUtf8(payload)).toUtf8(); // скрываем длину
     QStringList recips = m_convMembers.value(convId);
     recips << m_selfId;
     QJsonObject e;
@@ -185,7 +218,7 @@ QString MainWindow::encEnvelope(const QString& convId, const QByteArray& payload
     for (const auto& id : recips) {
         const QString pub = (id == m_selfId) ? Crypto::myPublicKey() : m_pubKeys.value(id);
         if (pub.isEmpty()) continue;
-        e[id] = Crypto::encryptFor(pub, payload);
+        e[id] = Crypto::encryptFor(pub, padded);
         any = true;
     }
     if (!any) return QString::fromUtf8(payload);
@@ -196,14 +229,68 @@ QByteArray MainWindow::decEnvelope(const QString& senderId, const QString& body)
     if (body.isEmpty()) return {};
     if (!body.startsWith('{')) { // легаси одиночный e2e: / открытый текст
         const QString otherPub = m_pubKeys.value(m_convMembers.value(m_activeConv).value(0));
-        return Crypto::decryptFrom(otherPub, body);
+        return unpadPayload(QString::fromUtf8(Crypto::decryptFrom(otherPub, body))).toUtf8();
     }
     const QJsonObject obj = QJsonDocument::fromJson(body.toUtf8()).object();
     if (!obj.contains("e")) return body.toUtf8(); // не конверт (плейнтекст с '{') — как есть
     const QJsonObject e = obj.value("e").toObject();
     if (!e.contains(m_selfId)) return {};          // конверт без копии для нас
     const QString senderPub = (senderId == m_selfId) ? Crypto::myPublicKey() : m_pubKeys.value(senderId);
-    return Crypto::decryptFrom(senderPub, e.value(m_selfId).toString());
+    return unpadPayload(QString::fromUtf8(Crypto::decryptFrom(senderPub, e.value(m_selfId).toString()))).toUtf8();
+}
+
+// Sealed-sender: сервер отдаёт senderId пустым. Автора вычисляем по тому, ЧЕЙ
+// публичный ключ расшифровал нашу копию (box аутентифицирован). outSender — id автора.
+QByteArray MainWindow::decMessage(const QString& senderId, const QString& body, QString& outSender) {
+    if (!senderId.isEmpty()) { outSender = senderId; return decEnvelope(senderId, body); } // легаси
+    outSender.clear();
+    if (body.isEmpty() || !body.startsWith('{')) return unpadPayload(body).toUtf8();
+    const QJsonObject obj = QJsonDocument::fromJson(body.toUtf8()).object();
+    if (!obj.contains("e")) return {};
+    const QJsonObject e = obj.value("e").toObject();
+    if (!e.contains(m_selfId)) return {};          // нет копии для нас
+    const QString mine = e.value(m_selfId).toString();
+    QStringList cands = m_convMembers.value(m_activeConv);
+    cands << m_selfId;
+    for (const auto& id : cands) {
+        const QString pub = (id == m_selfId) ? Crypto::myPublicKey() : m_pubKeys.value(id);
+        if (pub.isEmpty()) continue;
+        const QByteArray dec = Crypto::decryptFrom(pub, mine);
+        if (!dec.isEmpty()) { outSender = id; return unpadPayload(QString::fromUtf8(dec)).toUtf8(); }
+    }
+    return {}; // не смогли расшифровать
+}
+
+// Отпечаток ключа (safety number): SHA-512(публичный ключ), первые 16 байт hex.
+QString MainWindow::keyFingerprint(const QString& pubB64) const {
+    if (pubB64.isEmpty()) return "— (ключа ещё нет)";
+    const QByteArray raw = QByteArray::fromBase64(pubB64.toUtf8());
+    const QByteArray h = QCryptographicHash::hash(raw, QCryptographicHash::Sha512);
+    QString hex;
+    for (int i = 0; i < 16 && i < h.size(); ++i)
+        hex += QString("%1").arg(static_cast<quint8>(h[i]), 2, 16, QChar('0'));
+    QString grouped;
+    for (int i = 0; i < hex.size(); i += 4) grouped += hex.mid(i, 4).toUpper() + " ";
+    return grouped.trimmed();
+}
+void MainWindow::showSafety() {
+    if (m_activeConv.isEmpty()) return;
+    QString t = QString::fromUtf8("🔐 Отпечатки ключей. Сверьте с собеседником по ДРУГОМУ каналу "
+                "(звонок, лично) — тогда подмену ключа сервером (MITM) будет видно.\n\n");
+    t += "Ваш ключ:\n  " + keyFingerprint(Crypto::available() ? Crypto::myPublicKey() : QString()) + "\n";
+    for (const auto& id : m_convMembers.value(m_activeConv))
+        t += "\n" + id + ":\n  " + keyFingerprint(m_pubKeys.value(id)) + "\n";
+    t += QString::fromUtf8("\nСовпали у обоих → посредника нет. Не совпали → кто-то подменяет ключи.");
+    QMessageBox::information(this, QString::fromUtf8("Отпечатки ключей"), t);
+}
+
+// Sealed-sender: получить общий секрет постинга диалога (кэш). По нему шлём анонимно.
+void MainWindow::ensurePostToken(const QString& convId) {
+    if (m_postToken.contains(convId)) return;
+    m_api->get("/chat/conversations/" + convId + "/post-token",
+               [this, convId](bool ok, const QJsonValue& v, int) {
+        if (ok) m_postToken[convId] = v.toObject().value("postToken").toString();
+    });
 }
 
 void MainWindow::loadMessages(const QString& id, bool markRead) {
@@ -213,10 +300,12 @@ void MainWindow::loadMessages(const QString& id, bool markRead) {
         QString html;
         for (int i = items.size() - 1; i >= 0; --i) {
             const QJsonObject m = items[i].toObject();
-            const QString senderId = m.value("senderId").toString();
-            const bool mine = senderId == m_selfId;
+            if (m.value("type").toString("msg") != "msg") continue; // реакции не рисуем
             const QString rawBody = m.value("body").toString();
-            const QByteArray payload = decEnvelope(senderId, rawBody);
+            // sealed-sender: senderId с сервера пуст → автора и текст даёт trial-decrypt.
+            QString senderId;
+            const QByteArray payload = decMessage(m.value("senderId").toString(), rawBody, senderId);
+            const bool mine = senderId == m_selfId;
             const bool failed = payload.isEmpty() &&
                                 (rawBody.startsWith('{') || Crypto::isEncrypted(rawBody));
             const QString att = m.value("attachmentUrl").toString();
@@ -256,10 +345,9 @@ void MainWindow::loadMessages(const QString& id, bool markRead) {
         }
         m_msgView->setHtml(html);
         m_msgView->verticalScrollBar()->setValue(m_msgView->verticalScrollBar()->maximum());
-        if (markRead)
-            m_api->post("/chat/conversations/" + id + "/read", {}, [this](bool, const QJsonValue&, int) {
-                loadConversations();
-            });
+        // Приватность: read-receipt серверу НЕ шлём (раньше был POST .../read).
+        // Просто обновляем список диалогов.
+        if (markRead) loadConversations();
     });
 }
 
@@ -274,12 +362,22 @@ void MainWindow::onSend() {
     }
     m_input->clear();
     const QString body = encEnvelope(m_activeConv, text.toUtf8());
-    m_api->post("/chat/conversations/" + m_activeConv + "/messages",
-                QJsonObject{ {"body", body} }, [this](bool ok, const QJsonValue& v, int) {
-                    if (!ok) { QMessageBox::warning(this, "Чат", v.toObject().value("message").toString("Ошибка")); return; }
-                    loadMessages(m_activeConv, false);
-                    loadConversations();
-                });
+    const QString conv = m_activeConv;
+    auto onDone = [this, conv](bool ok, const QJsonValue& v, int) {
+        if (!ok) { QMessageBox::warning(this, "Чат", v.toObject().value("message").toString("Ошибка")); return; }
+        loadMessages(conv, false);
+        loadConversations();
+    };
+    // sealed-sender: шлём анонимно (сервер не узнаёт автора). Фолбэк на legacy
+    // authed-путь, если секрет постинга ещё не получен.
+    const QString tok = m_postToken.value(conv);
+    if (!tok.isEmpty()) {
+        m_api->postSealed("/chat/conversations/" + conv + "/sealed-messages",
+                          QJsonObject{ {"postToken", tok}, {"body", body} }, onDone);
+    } else {
+        m_api->post("/chat/conversations/" + conv + "/messages",
+                    QJsonObject{ {"body", body} }, onDone);
+    }
 }
 
 void MainWindow::onAttach() {

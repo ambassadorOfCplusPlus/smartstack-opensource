@@ -44,6 +44,15 @@ export const setKeySchema = z.object({
   publicKey: z.string().trim().min(1).max(1000),
 });
 
+// Sealed-отправка: авторизация общим секретом диалога (postToken), БЕЗ токена
+// личности. type: 'msg' (обычное) | 'react' (реакция). Тело — шифротекст E2E.
+export const sealedSendSchema = z.object({
+  postToken: z.string().min(1).max(200),
+  body: z.string().max(262144).optional(),
+  attachmentUrl: z.string().max(500).optional(),
+  type: z.enum(['msg', 'react']).optional(),
+});
+
 // Групповой диалог. id участников — UUID (как в createConvSchema), иначе
 // не-UUID долетает до Postgres uuid-колонки и даёт 500 вместо чистого 400.
 export const createGroupSchema = z.object({

@@ -43,7 +43,8 @@
   .conv .l { color:var(--muted); font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px; }
   .badge { background:var(--accent); color:#04221c; border-radius:10px; padding:0 7px; font-size:12px; font-weight:700; height:18px; display:inline-flex; align-items:center; }
   #main { flex:1; display:flex; flex-direction:column; background:var(--bg); }
-  #mhead { padding:14px; border-bottom:1px solid #2a3942; background:var(--panel); font-weight:600; }
+  #mhead { padding:14px; border-bottom:1px solid #2a3942; background:var(--panel); font-weight:600; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  #safetyBtn { background:none; border:1px solid #2a3942; border-radius:6px; cursor:pointer; font-size:16px; padding:2px 8px; }
   #msgs { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:8px; }
   .msg { max-width:70%; padding:8px 10px; border-radius:8px; font-size:14px; word-wrap:break-word; }
   .msg.me { align-self:flex-end; background:var(--bubble-me); }
@@ -115,7 +116,7 @@
   <div id="main">
     <div id="empty">Выберите диалог или начните новый</div>
     <div id="chat" class="hidden" style="display:flex; flex-direction:column; height:100%;">
-      <div id="mhead"></div>
+      <div id="mhead"><span id="mtitle"></span><button id="safetyBtn" onclick="showSafety()" title="Отпечатки ключей — защита от подмены (MITM)">🔐</button></div>
       <div id="msgs"></div>
       <div id="composer">
         <button class="iconbtn" onclick="document.getElementById('file').click()" title="Файл">📎</button>
@@ -200,25 +201,82 @@ function e2eDecBytes(theirPubB64, blobStr) { // строка-блоб → Uint8A
 // ── Групповой E2E: конверт (копия шифра каждому участнику) ────────────────────
 const convParts = {};   // convId → [{id, publicKey}] участники (без себя)
 const fileKeys = {};    // key64 вложения → { k: base64-ключ, name }
+const convPostToken = {}; // sealed-sender: convId → общий секрет постинга
 function myPubB64() { return nacl.util.encodeBase64(myKeys.publicKey); }
+
+// Приватность: прочтение НЕ сообщаем серверу (никаких read-receipt). Время
+// прочтения каждого диалога храним ЛОКАЛЬНО; «непрочитанное» считаем на клиенте.
+let localRead = {};
+try { localRead = JSON.parse(LS.getItem('msg_read') || '{}'); } catch {}
+function markReadLocal(convId, isoTime) {
+  localRead[convId] = isoTime || new Date().toISOString();
+  LS.setItem('msg_read', JSON.stringify(localRead));
+}
+function isUnread(c) {
+  if (!c.lastMessage || c.id === activeId) return false; // активный диалог читаем
+  const r = localRead[c.id];
+  return !r || c.lastMessage.createdAt > r; // ISO-строки сравнимы лексикографически
+}
+
+// Padding: дополняем открытый текст ДО шифрования до фиксированных «вёдер», чтобы
+// по длине шифротекста нельзя было оценить размер сообщения. Формат:
+// "P1\n<реальная длина>\n<текст><пробелы>". Без маркера "P1\n" payload считается
+// старым/открытым (обратная совместимость). Длина — в UTF-16 code units
+// (String.length), что совпадает с QString::length в Qt-клиенте.
+const PAD_BUCKETS = [128, 512, 2048, 8192, 32768, 131072];
+function padPayload(s) {
+  const body = 'P1\n' + s.length + '\n' + s;
+  const target = PAD_BUCKETS.find((b) => b >= body.length) || Math.ceil(body.length / 131072) * 131072;
+  return body + ' '.repeat(target - body.length);
+}
+function unpadPayload(s) {
+  if (s == null || s.slice(0, 3) !== 'P1\n') return s;
+  const i = s.indexOf('\n', 3);
+  if (i < 0) return s;
+  const len = parseInt(s.slice(3, i), 10);
+  if (!Number.isFinite(len)) return s;
+  return s.slice(i + 1, i + 1 + len);
+}
+
 // Зашифровать payload каждому участнику (включая себя) его публичным ключом.
+// Перед шифрованием — padding (скрывает длину).
 function encEnvelope(convId, payloadStr) {
   if (!myKeys) return payloadStr;
+  const padded = padPayload(payloadStr);
   const recips = [...(convParts[convId] || []), { id: me.id, publicKey: myPubB64() }];
   const e = {}; let any = false;
-  for (const r of recips) { if (r.publicKey) { e[r.id] = e2eEnc(r.publicKey, payloadStr); any = true; } }
+  for (const r of recips) { if (r.publicKey) { e[r.id] = e2eEnc(r.publicKey, padded); any = true; } }
   return any ? JSON.stringify({ g: 1, e }) : payloadStr;
 }
-// Расшифровать конверт: своя копия + публичный ключ отправителя.
+// Расшифровать конверт: своя копия + публичный ключ отправителя (+ unpad).
 function decEnvelope(senderId, body) {
   if (!body) return body;
-  if (body[0] !== '{') return e2eDec(convOtherPub[activeId], body); // легаси 1-на-1 / открытый текст
+  if (body[0] !== '{') return unpadPayload(e2eDec(convOtherPub[activeId], body)); // легаси 1-на-1
   let obj; try { obj = JSON.parse(body); } catch { return body; }
   if (!obj || !obj.e) return body;
   const mine = obj.e[me.id];
   if (!mine) return null; // нет копии для нас
   const senderPub = senderId === me.id ? myPubB64() : userPub[senderId];
-  return e2eDec(senderPub, mine);
+  return unpadPayload(e2eDec(senderPub, mine));
+}
+// Sealed-sender: сервер отдаёт senderId=null, поэтому отправителя вычисляем по
+// тому, ЧЕЙ публичный ключ расшифровал нашу копию (box аутентифицирован —
+// подойдёт только ключ автора). Возвращает { sender, payload }.
+function decMessage(m) {
+  if (m.senderId) return { sender: m.senderId, payload: decEnvelope(m.senderId, m.body) }; // легаси
+  const body = m.body;
+  if (!body || body[0] !== '{') return { sender: null, payload: unpadPayload(body) };
+  let obj; try { obj = JSON.parse(body); } catch { return { sender: null, payload: body }; }
+  if (!obj || !obj.e) return { sender: null, payload: body };
+  const mine = obj.e[me.id];
+  if (!mine) return { sender: null, payload: null }; // нет копии для нас
+  const cands = [...(convParts[activeId] || []), { id: me.id, publicKey: myPubB64() }];
+  for (const c of cands) {
+    if (!c.publicKey) continue;
+    const dec = e2eDec(c.publicKey, mine);
+    if (dec != null) return { sender: c.id, payload: unpadPayload(dec) };
+  }
+  return { sender: null, payload: null }; // не смогли расшифровать
 }
 // Файлы (гибрид): случайный ключ K шифрует файл один раз; K кладём в payload конверта.
 function secretboxEnc(bytes) {
@@ -234,6 +292,42 @@ function secretboxDec(blob, keyB64) {
 function convEncryptable(id) {
   const ps = convParts[id] || [];
   return ps.length > 0 && ps.every(p => p.publicKey);
+}
+
+// Аутентификация ключей (safety numbers): отпечаток = SHA-512(публичный ключ),
+// первые 16 байт hex-группами. Сверка по ДРУГОМУ каналу ловит подмену ключа
+// (MITM со стороны сервера) — сервер не может подделать отпечаток, не зная, что
+// сверяют, а подмена ключа даст несовпадение у собеседника.
+function keyFingerprint(pubB64) {
+  if (!pubB64) return '— (ключа ещё нет)';
+  try {
+    const h = nacl.hash(nacl.util.decodeBase64(pubB64)); // SHA-512
+    let hex = '';
+    for (let i = 0; i < 16; i++) hex += h[i].toString(16).padStart(2, '0');
+    return hex.replace(/(.{4})/g, '$1 ').trim().toUpperCase();
+  } catch { return '?'; }
+}
+function showSafety() {
+  if (!activeId) return;
+  const parts = ['🔐 Отпечатки ключей. Сверьте их с собеседником по ДРУГОМУ каналу',
+    '(звонок, лично) — тогда подмену ключа сервером (MITM) будет видно.', '',
+    'Ваш ключ:', '  ' + keyFingerprint(myKeys ? myPubB64() : null)];
+  for (const p of (convParts[activeId] || [])) {
+    parts.push('', (p.name || p.id) + ':', '  ' + keyFingerprint(p.publicKey));
+  }
+  parts.push('', 'Совпали у обоих → посредника нет. Не совпали → кто-то подменяет ключи.');
+  alert(parts.join('\n'));
+}
+// Sealed-отправка: POST на /sealed-messages БЕЗ заголовка личности — авторизация
+// секретом диалога (postToken). Сервер не узнаёт автора (senderId не сохраняется).
+async function sealedPost(convId, payload, attachmentUrl, type) {
+  const tok = convPostToken[convId];
+  if (!tok) throw new Error('Нет токена диалога');
+  const res = await fetch(api('/chat/conversations/' + convId + '/sealed-messages'), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ postToken: tok, body: payload, attachmentUrl, type: type || 'msg' }),
+  });
+  if (!res.ok) throw new Error('Ошибка отправки ' + res.status);
 }
 
 function api(path) { return apiBase.replace(/\/$/, '') + '/api/v1/messenger' + path; }
@@ -347,7 +441,7 @@ function renderConvs() {
     div.onclick = () => openConv(c.id);
     div.innerHTML = `<div><div class="t">${esc(c.title)}</div>
       <div class="l">${esc(previewText(c))}</div></div>
-      ${c.unread ? `<span class="badge">${c.unread}</span>` : ''}`;
+      ${isUnread(c) ? `<span class="badge" title="Непрочитанные">•</span>` : ''}`;
     box.appendChild(div);
   });
 }
@@ -358,10 +452,14 @@ async function openConv(id) {
   document.getElementById('chat').classList.remove('hidden');
   const enc = convEncryptable(id);
   const isGroup = c && c.isGroup;
-  document.getElementById('mhead').textContent =
+  document.getElementById('mtitle').textContent =
     (c ? c.title : 'Диалог')
     + (isGroup ? ` · группа (${(convParts[id]||[]).length + 1})` : '')
     + (enc ? '  🔒 зашифровано' : '  ⚠ есть участник без ключа');
+  // sealed-sender: получаем общий секрет постинга (кэш) — чтобы слать анонимно.
+  if (!convPostToken[id]) {
+    try { convPostToken[id] = (await call('/chat/conversations/' + id + '/post-token')).postToken; } catch {}
+  }
   renderConvs();
   await loadMsgs(id, true);
 }
@@ -371,12 +469,14 @@ async function loadMsgs(id, markRead) {
     if (id !== activeId) return;
     const box = document.getElementById('msgs');
     box.innerHTML = '';
-    items.slice().reverse().forEach(m => {
-      const mine = m.senderId === me.id;
+    // Реакции (type='react') не рисуем как сообщения (UI реакций — отдельная задача).
+    items.filter(m => (m.type || 'msg') === 'msg').slice().reverse().forEach(m => {
+      // sealed-sender: senderId=null → автора и текст определяем trial-decrypt'ом.
+      const dm = decMessage(m);
+      const mine = dm.sender === me.id;
       const div = document.createElement('div');
       div.className = 'msg ' + (mine ? 'me' : 'you');
-      // E2E: расшифровываем конверт (своя копия + публичный ключ отправителя).
-      const payload = decEnvelope(m.senderId, m.body);
+      const payload = dm.payload;
       let html;
       if (m.attachmentUrl) {
         const k64 = encodeURIComponent(btoa(unescape(encodeURIComponent(m.attachmentUrl))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''));
@@ -395,7 +495,8 @@ async function loadMsgs(id, markRead) {
       box.appendChild(div);
     });
     box.scrollTop = box.scrollHeight;
-    if (markRead) { try { await call('/chat/conversations/' + id + '/read', { method:'POST' }); loadConvs(); } catch {} }
+    // Прочтение — ЛОКАЛЬНО (без read-receipt на сервер). Обновляем бейджи.
+    if (markRead) { markReadLocal(id); loadConvs(); }
   } catch {}
 }
 async function sendMsg() {
@@ -409,10 +510,17 @@ async function sendMsg() {
   }
   inp.value = '';
   try {
-    await call('/chat/conversations/' + activeId + '/messages', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body: encEnvelope(activeId, body) }),
-    });
+    // sealed-sender: шлём анонимно (сервер не узнаёт автора). Фолбэк на legacy
+    // authed-роут, если по какой-то причине нет токена постинга.
+    if (convPostToken[activeId]) {
+      await sealedPost(activeId, encEnvelope(activeId, body));
+    } else {
+      await call('/chat/conversations/' + activeId + '/messages', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body: encEnvelope(activeId, body) }),
+      });
+    }
+    markReadLocal(activeId);
     loadMsgs(activeId, false); loadConvs();
   } catch (e) { alert(e.message); }
 }
@@ -431,19 +539,43 @@ async function sendFile() {
     const { blob, keyB64 } = secretboxEnc(buf);
     const encFile = new File([blob], f.name, { type: f.type || 'application/octet-stream' });
     const fd = new FormData(); fd.append('file', encFile);
-    const up = await call('/chat/conversations/' + activeId + '/attachments', { method:'POST', body: fd });
     const payload = JSON.stringify({ name: f.name, k: keyB64 });
-    await call('/chat/conversations/' + activeId + '/messages', {
-      method:'POST', headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ body: encEnvelope(activeId, payload), attachmentUrl: up.key }),
-    });
+    const tok = convPostToken[activeId];
+    let upKey;
+    if (tok) {
+      // sealed: загрузка по секрету диалога (x-post-token), без личности.
+      const res = await fetch(api('/chat/conversations/' + activeId + '/sealed-attachments'), {
+        method: 'POST', headers: { 'x-post-token': tok }, body: fd,
+      });
+      if (!res.ok) throw new Error('Ошибка загрузки ' + res.status);
+      upKey = (await res.json()).key;
+      await sealedPost(activeId, encEnvelope(activeId, payload), upKey);
+    } else {
+      // фолбэк на legacy authed-путь.
+      const up = await call('/chat/conversations/' + activeId + '/attachments', { method:'POST', body: fd });
+      await call('/chat/conversations/' + activeId + '/messages', {
+        method:'POST', headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ body: encEnvelope(activeId, payload), attachmentUrl: up.key }),
+      });
+    }
     document.getElementById('file').value = '';
+    markReadLocal(activeId);
     loadMsgs(activeId, false); loadConvs();
   } catch (e) { alert(e.message); }
 }
 async function dl(key64) {
   try {
-    const res = await fetch(api('/chat/attachments/download?key64=' + key64), { headers: { 'Authorization': 'Bearer ' + token } });
+    // sealed-скачивание: ключ и секрет диалога — в ЗАГОЛОВКАХ (не в URL → не в логах).
+    // Фолбэк на legacy authed-путь, если нет токена постинга.
+    const tok = activeId ? convPostToken[activeId] : null;
+    let res;
+    if (tok) {
+      let rawKey = '';
+      try { rawKey = decodeURIComponent(escape(atob(key64.replace(/-/g, '+').replace(/_/g, '/')))); } catch {}
+      res = await fetch(api('/chat/sealed-attachments/download'), { headers: { 'x-att-key': rawKey, 'x-post-token': tok } });
+    } else {
+      res = await fetch(api('/chat/attachments/download?key64=' + key64), { headers: { 'Authorization': 'Bearer ' + token } });
+    }
     if (!res.ok) throw new Error('Не удалось скачать');
     const buf = new Uint8Array(await res.arrayBuffer());
     const fk = fileKeys[key64];

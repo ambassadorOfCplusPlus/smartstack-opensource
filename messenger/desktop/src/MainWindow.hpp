@@ -37,6 +37,18 @@ private:
     QByteArray decEnvelope(const QString& senderId, const QString& body);
     bool convEncryptable(const QString& convId) const;
 
+    // Приватность (sealed-sender / «вариант 1»):
+    // padding длины сообщения; trial-decrypt автора (senderId с сервера пуст);
+    // отпечаток ключа (safety number) для защиты от подмены ключа (MITM).
+    QString padPayload(const QString& s) const;
+    QString unpadPayload(const QString& s) const;
+    // Расшифровать + определить отправителя. Если senderId пуст (sealed) —
+    // перебираем ключи участников: автор тот, чьим ключом расшифровалась наша копия.
+    QByteArray decMessage(const QString& senderId, const QString& body, QString& outSender);
+    QString keyFingerprint(const QString& pubB64) const;
+    void showSafety();
+    void ensurePostToken(const QString& convId);  // получить секрет постинга диалога
+
     ApiClient* m_api;
     QString m_selfId, m_selfName;
     QString m_activeConv;
@@ -47,6 +59,7 @@ private:
     QHash<QString, QString> m_convTitle;
     QHash<QString, QString> m_fileKeyB64;       // key64 вложения → ключ файла
     QHash<QString, QString> m_fileName;         // key64 вложения → имя
+    QHash<QString, QString> m_postToken;        // convId → секрет постинга (sealed-sender)
 
     QListWidget*  m_convList = nullptr;
     QTextBrowser* m_msgView = nullptr;

@@ -36,6 +36,7 @@ import {
   sendMessageSchema,
   messagesQuerySchema,
   setKeySchema,
+  sealedSendSchema,
 } from './schema';
 
 export interface MessengerRoutesOptions {
@@ -282,6 +283,68 @@ export async function registerMessengerRoutes(
     try {
       const { id } = convIdParamSchema.parse(request.params);
       return reply.send(await chat.markRead(caller(request), id));
+    } catch (err) {
+      return handleError(reply, err);
+    }
+  });
+
+  // ── Sealed-sender: приватная отправка (сервер не знает автора) ───────────────
+  // Участник по своему токену получает общий секрет постинга диалога (postToken).
+  app.get('/api/v1/messenger/chat/conversations/:id/post-token', mGuard, async (request: FastifyRequest, reply) => {
+    try {
+      const { id } = convIdParamSchema.parse(request.params);
+      return reply.send(await chat.getPostToken(caller(request), id));
+    } catch (err) {
+      return handleError(reply, err);
+    }
+  });
+
+  // Отправка БЕЗ токена личности — авторизация секретом диалога в теле (postToken).
+  // Сервер не сохраняет senderId → не знает, кто из участников написал.
+  app.post('/api/v1/messenger/chat/conversations/:id/sealed-messages', async (request: FastifyRequest, reply) => {
+    try {
+      const { id } = convIdParamSchema.parse(request.params);
+      const b = sealedSendSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(await chat.sealedSend(id, b.postToken, b.body ?? '', b.attachmentUrl, b.type ?? 'msg'));
+    } catch (err) {
+      return handleError(reply, err);
+    }
+  });
+
+  // Sealed-вложение: загрузка (multipart) по секрету диалога в заголовке
+  // x-post-token. Содержимое уже E2E. Возвращает {key} для sealed-сообщения.
+  app.post('/api/v1/messenger/chat/conversations/:id/sealed-attachments', async (request: FastifyRequest, reply) => {
+    try {
+      const { id } = convIdParamSchema.parse(request.params);
+      const postToken = (request.headers['x-post-token'] as string | undefined) ?? '';
+      if (!postToken) return reply.status(400).send({ error: 'BadRequest', message: 'Нет x-post-token' });
+      const file = await request.file();
+      if (!file) return reply.status(400).send({ error: 'ValidationError', message: 'Файл не передан' });
+      const buffer = await file.toBuffer();
+      if (file.file.truncated) {
+        return reply.status(413).send({ error: 'PayloadTooLarge', message: 'Файл превышает 25 МБ' });
+      }
+      return reply
+        .status(201)
+        .send(await chat.sealedUploadAttachment(id, postToken, buffer, file.mimetype, file.filename));
+    } catch (err) {
+      return handleError(reply, err);
+    }
+  });
+
+  // Sealed-вложение: скачивание. Ключ и секрет — в ЗАГОЛОВКАХ (x-att-key,
+  // x-post-token), не в URL → не оседают в логах/истории.
+  app.get('/api/v1/messenger/chat/sealed-attachments/download', async (request: FastifyRequest, reply) => {
+    try {
+      const postToken = (request.headers['x-post-token'] as string | undefined) ?? '';
+      const key = (request.headers['x-att-key'] as string | undefined) ?? '';
+      if (!postToken || !key) {
+        return reply.status(400).send({ error: 'BadRequest', message: 'Нужны x-att-key и x-post-token' });
+      }
+      const { buffer, filename } = await chat.sealedDownloadAttachment(postToken, key);
+      return reply.header('Content-Disposition', `attachment; filename="${filename}"`).send(buffer);
     } catch (err) {
       return handleError(reply, err);
     }

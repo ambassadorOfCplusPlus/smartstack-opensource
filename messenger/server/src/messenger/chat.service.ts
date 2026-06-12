@@ -4,12 +4,23 @@
 // kind='messenger'). Реал-тайм клиента — опрос (как в основном чате), сокетов нет
 // → серверу дёшево.
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { isUnsafeStorageKey, safeStorageName, type FileStorage } from '../lib/file-storage';
 import { assertAllowedAttachment } from '../lib/attachments';
 
 export const MESSENGER_BUCKET = 'messenger';
+
+// Sealed-sender: общий секрет постинга диалога (его знают только участники).
+function genPostSecret(): string {
+  return randomBytes(24).toString('base64url');
+}
+// Сравнение секрета в постоянное время (без утечки по таймингу).
+function secretEquals(a: string, b: string): boolean {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ba.length === bb.length && timingSafeEqual(ba, bb);
+}
 
 export class MessengerChatError extends Error {
   constructor(
@@ -85,6 +96,56 @@ export class MessengerChatService {
     return p;
   }
 
+  // Sealed-sender: участник (по своему токену личности) получает общий секрет
+  // постинга диалога. Дальше отправка идёт по нему — БЕЗ токена личности, поэтому
+  // сервер не знает, кто из участников написал. Для старых диалогов (без секрета)
+  // генерируем лениво и сохраняем.
+  async getPostToken(caller: MessengerCaller, conversationId: string) {
+    await this.assertParticipant(caller, conversationId);
+    const conv = await this.prisma.messengerConversation.findUnique({ where: { id: conversationId } });
+    if (!conv) throw new MessengerChatError(404, 'NotFound', 'Диалог не найден');
+    let secret = conv.postSecret;
+    if (!secret) {
+      secret = genPostSecret();
+      await this.prisma.messengerConversation.update({
+        where: { id: conversationId },
+        data: { postSecret: secret },
+      });
+    }
+    return { postToken: secret };
+  }
+
+  // Sealed-sender: анонимная отправка по общему секрету диалога. Сервер НЕ знает,
+  // кто из участников написал (senderId НЕ сохраняется). Личность отправителя —
+  // внутри E2E-payload, её узнаёт только получатель (по тому, чьим ключом
+  // расшифровался конверт). type: 'msg' | 'react'.
+  async sealedSend(
+    conversationId: string,
+    postSecret: string,
+    body: string,
+    attachmentUrl?: string,
+    type: string = 'msg',
+  ) {
+    const text = (body ?? '').trim();
+    if (!text && !attachmentUrl) throw new MessengerChatError(400, 'BadRequest', 'Пустое сообщение');
+    const conv = await this.prisma.messengerConversation.findUnique({ where: { id: conversationId } });
+    if (!conv || !conv.postSecret || !postSecret || !secretEquals(conv.postSecret, postSecret)) {
+      throw new MessengerChatError(403, 'Forbidden', 'Неверный токен диалога');
+    }
+    const kind = type === 'react' ? 'react' : 'msg';
+    const msg = await this.prisma.messengerMessage.create({
+      data: { conversationId, senderId: null, type: kind, body: text, attachmentUrl: attachmentUrl ?? null },
+    });
+    // Реакции (type!='msg') НЕ двигают диалог вверх и не становятся «последним сообщением».
+    if (kind === 'msg') {
+      await this.prisma.messengerConversation.update({
+        where: { id: conversationId },
+        data: { updatedAt: new Date() },
+      });
+    }
+    return { id: msg.id, createdAt: msg.createdAt };
+  }
+
   // Диалоги пользователя + последнее сообщение + число непрочитанных.
   async listConversations(caller: MessengerCaller) {
     const memberships = await this.prisma.messengerParticipant.findMany({
@@ -97,7 +158,8 @@ export class MessengerChatService {
       where: { id: { in: convIds }, organizationId: caller.orgId },
       include: {
         participants: { include: { messengerUser: { select: { id: true, messengerId: true, displayName: true, publicKey: true } } } },
-        messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+        // Превью — только обычные сообщения (реакции не показываем как «последнее»).
+        messages: { where: { type: 'msg' }, orderBy: { createdAt: 'desc' }, take: 1 },
       },
       orderBy: { updatedAt: 'desc' },
     });
@@ -107,9 +169,13 @@ export class MessengerChatService {
     for (const conv of conversations) {
       const mine = byId.get(conv.id);
       const lastReadAt = mine?.lastReadAt ?? null;
+      // Серверный счётчик непрочитанного — best-effort: при sealed-отправке
+      // senderId=null (автор не сохранён), поэтому свои сообщения не вычесть —
+      // точный счёт ведёт клиент (localRead). Реакции не считаем.
       const unread = await this.prisma.messengerMessage.count({
         where: {
           conversationId: conv.id,
+          type: 'msg',
           senderId: { not: caller.userId },
           ...(lastReadAt ? { createdAt: { gt: lastReadAt } } : {}),
         },
@@ -229,7 +295,8 @@ export class MessengerChatService {
     });
     return messages.map((m) => ({
       id: m.id,
-      senderId: m.senderId,
+      senderId: m.senderId, // null при sealed-отправке (автор внутри E2E-payload)
+      type: m.type, // 'msg' | 'react'
       body: m.body,
       attachmentUrl: m.attachmentUrl,
       createdAt: m.createdAt,
@@ -308,6 +375,51 @@ export class MessengerChatService {
     }
     // parts[1] — conversationId; проверяем участие звонящего.
     await this.assertParticipant(caller, parts[1]);
+    const buffer = await this.storage.download(MESSENGER_BUCKET, key);
+    if (!buffer) throw new MessengerChatError(404, 'NotFound', 'Файл не найден');
+    const filename = parts.slice(2).join('/').replace(/^[0-9a-f-]+_/i, '');
+    return { buffer, filename };
+  }
+
+  // Sealed-вложение: загрузка по общему секрету диалога (без токена личности).
+  // Содержимое уже зашифровано на клиенте (E2E-гибрид) — сервер хранит шифроблоб.
+  async sealedUploadAttachment(
+    conversationId: string,
+    postSecret: string,
+    buffer: Buffer,
+    mime: string,
+    filename: string,
+  ) {
+    if (!this.storage) {
+      throw new MessengerChatError(500, 'StorageUnavailable', 'Файловое хранилище не настроено');
+    }
+    const conv = await this.prisma.messengerConversation.findUnique({ where: { id: conversationId } });
+    if (!conv || !conv.postSecret || !postSecret || !secretEquals(conv.postSecret, postSecret)) {
+      throw new MessengerChatError(403, 'Forbidden', 'Неверный токен диалога');
+    }
+    assertAllowedAttachment(mime, filename);
+    const base = filename.split(/[\\/]/).pop() ?? 'file';
+    const safeName = safeStorageName(base, 200) || 'file';
+    const key = `${MESSENGER_BUCKET}/${conversationId}/${randomUUID()}_${safeName}`;
+    await this.storage.upload(MESSENGER_BUCKET, key, buffer, mime);
+    return { key, filename: safeName };
+  }
+
+  // Sealed-вложение: скачивание по ключу, авторизованное секретом диалога (без
+  // личности). Сервер не узнаёт, кто скачал; блоб всё равно E2E.
+  async sealedDownloadAttachment(postSecret: string, key: string) {
+    if (!this.storage) {
+      throw new MessengerChatError(500, 'StorageUnavailable', 'Файловое хранилище не настроено');
+    }
+    if (isUnsafeStorageKey(key)) throw new MessengerChatError(400, 'BadKey', 'Недопустимый ключ вложения');
+    const parts = key.split('/');
+    if (parts.length < 3 || parts[0] !== MESSENGER_BUCKET) {
+      throw new MessengerChatError(400, 'BadKey', 'Недопустимый ключ вложения');
+    }
+    const conv = await this.prisma.messengerConversation.findUnique({ where: { id: parts[1] } });
+    if (!conv || !conv.postSecret || !postSecret || !secretEquals(conv.postSecret, postSecret)) {
+      throw new MessengerChatError(403, 'Forbidden', 'Неверный токен диалога');
+    }
     const buffer = await this.storage.download(MESSENGER_BUCKET, key);
     if (!buffer) throw new MessengerChatError(404, 'NotFound', 'Файл не найден');
     const filename = parts.slice(2).join('/').replace(/^[0-9a-f-]+_/i, '');

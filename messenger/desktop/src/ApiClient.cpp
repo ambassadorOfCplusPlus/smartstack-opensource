@@ -21,10 +21,10 @@ QString ApiClient::url(const QString& path) const {
 }
 
 void ApiClient::send(const QByteArray& verb, const QString& path, const QByteArray& body,
-                     const QString& contentType, JsonCb cb) {
+                     const QString& contentType, JsonCb cb, bool auth) {
     QNetworkRequest req{ QUrl(url(path)) };
     if (!contentType.isEmpty()) req.setHeader(QNetworkRequest::ContentTypeHeader, contentType);
-    if (!m_token.isEmpty()) req.setRawHeader("Authorization", "Bearer " + m_token.toUtf8());
+    if (auth && !m_token.isEmpty()) req.setRawHeader("Authorization", "Bearer " + m_token.toUtf8());
 
     QNetworkReply* reply = m_nam->sendCustomRequest(req, verb, body);
     QObject::connect(reply, &QNetworkReply::finished, this, [reply, cb]() {
@@ -47,6 +47,12 @@ void ApiClient::post(const QString& path, const QJsonObject& body, JsonCb cb) {
 
 void ApiClient::put(const QString& path, const QJsonObject& body, JsonCb cb) {
     send("PUT", path, QJsonDocument(body).toJson(QJsonDocument::Compact), "application/json", std::move(cb));
+}
+
+void ApiClient::postSealed(const QString& path, const QJsonObject& body, JsonCb cb) {
+    // auth=false: без Authorization — авторизация секретом диалога в теле.
+    send("POST", path, QJsonDocument(body).toJson(QJsonDocument::Compact), "application/json",
+         std::move(cb), /*auth=*/false);
 }
 
 void ApiClient::uploadFile(const QString& path, const QString& filePath, JsonCb cb) {

@@ -26,6 +26,9 @@ public:
     void get(const QString& path, JsonCb cb);
     void post(const QString& path, const QJsonObject& body, JsonCb cb);
     void put(const QString& path, const QJsonObject& body, JsonCb cb);
+    // Sealed-sender: POST БЕЗ заголовка Authorization (личность не раскрывается —
+    // авторизация секретом диалога в теле, postToken). Сервер не узнаёт автора.
+    void postSealed(const QString& path, const QJsonObject& body, JsonCb cb);
     void uploadFile(const QString& path, const QString& filePath, JsonCb cb);
     void downloadBin(const QString& path, BinCb cb);
 
@@ -34,6 +37,7 @@ private:
     QString m_base;
     QString m_token;
     QString url(const QString& path) const;
+    // auth=false → не добавляем Authorization (sealed-отправка).
     void send(const QByteArray& verb, const QString& path, const QByteArray& body,
-              const QString& contentType, JsonCb cb);
+              const QString& contentType, JsonCb cb, bool auth = true);
 };
