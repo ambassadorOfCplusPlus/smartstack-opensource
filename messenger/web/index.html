@@ -264,6 +264,30 @@ function unpadPayload(s) {
   return s.slice(i + 1, i + 1 + len);
 }
 
+// MsgFlags — зеркало desktop/src/MsgFlags.hpp: «технические флаги» сообщения в
+// ОДНОМ числе (на C++ — quint64), разбираем битовыми операциями. Раскладка:
+// биты 0..7 kind (вид), бит8 reply, бит9 edit, бит10 delete. Значения малы (<2^16),
+// поэтому в JS хватает обычного number; «long long» — на стороне C++.
+const MsgFlags = {
+  Text: 0, File: 1, React: 2, Voice: 3, System: 4,
+  KIND_MASK: 0xFF, F_REPLY: 1 << 8, F_EDIT: 1 << 9, F_DELETE: 1 << 10,
+  pack(kind, reply = false, edit = false, del = false) {
+    return (kind & this.KIND_MASK) | (reply ? this.F_REPLY : 0) |
+           (edit ? this.F_EDIT : 0) | (del ? this.F_DELETE : 0);
+  },
+  kind(f) { return (f | 0) & this.KIND_MASK; },
+  isReply(f) { return ((f | 0) & this.F_REPLY) !== 0; },
+  isEdit(f) { return ((f | 0) & this.F_EDIT) !== 0; },
+  isDelete(f) { return ((f | 0) & this.F_DELETE) !== 0; },
+};
+// Мини-самопроверка раскладки (аналог static_assert в C++) — в консоль при расхождении.
+console.assert(
+  MsgFlags.kind(MsgFlags.pack(MsgFlags.File)) === MsgFlags.File &&
+  MsgFlags.pack(MsgFlags.React) === 2 &&
+  MsgFlags.isReply(MsgFlags.pack(MsgFlags.Text, true)),
+  'MsgFlags: раскладка разъехалась с C++',
+);
+
 // Зашифровать payload каждому участнику (включая себя) его публичным ключом.
 // Перед шифрованием — padding (скрывает длину).
 function encEnvelope(convId, payloadStr) {
@@ -363,7 +387,7 @@ async function react(targetMsgId, emoji) {
   // Сервер не видит ни автора, ни эмодзи, ни цель. Каждое — toggle; клиент
   // реплеит их и считает состояние.
   if (!convPostToken[activeId] || !myKeys) return;
-  const env = encEnvelope(activeId, JSON.stringify({ m: targetMsgId, e: emoji }));
+  const env = encEnvelope(activeId, JSON.stringify({ m: targetMsgId, e: emoji, f: MsgFlags.pack(MsgFlags.React) }));
   try { await sealedPost(activeId, env, undefined, 'react'); loadMsgs(activeId, false); } catch {}
 }
 // Состояние реакций из sealed-сообщений type='react' (replay toggle):
@@ -634,7 +658,7 @@ async function sendFile() {
     const { blob, keyB64 } = secretboxEnc(buf);
     const encFile = new File([blob], f.name, { type: f.type || 'application/octet-stream' });
     const fd = new FormData(); fd.append('file', encFile);
-    const payload = JSON.stringify({ name: f.name, k: keyB64 });
+    const payload = JSON.stringify({ name: f.name, k: keyB64, f: MsgFlags.pack(MsgFlags.File) });
     const tok = convPostToken[activeId];
     let upKey;
     if (tok) {

@@ -1,6 +1,7 @@
 #include "MainWindow.hpp"
 #include "ApiClient.hpp"
 #include "Crypto.hpp"
+#include "MsgFlags.hpp"   // упаковка технических флагов в один quint64
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QListWidget>
@@ -409,7 +410,11 @@ void MainWindow::onAttach() {
         QFile::remove(QDir::temp().filePath("ssm_up_" + name));
         if (!ok) { QMessageBox::warning(this, "Файл", v.toObject().value("message").toString("Не удалось загрузить")); return; }
         const QString key = v.toObject().value("key").toString();
-        const QJsonObject payload{ {"name", name}, {"k", keyB64} };
+        // f — упакованные технические флаги (вид=File) одним числом, см. MsgFlags.hpp.
+        const QJsonObject payload{
+            {"name", name}, {"k", keyB64},
+            {"f", static_cast<qint64>(msg::pack(msg::File))},
+        };
         const QString body = encEnvelope(convId, QJsonDocument(payload).toJson(QJsonDocument::Compact));
         auto done = [this, convId](bool, const QJsonValue&, int) { loadMessages(convId, false); };
         if (!tok.isEmpty())
