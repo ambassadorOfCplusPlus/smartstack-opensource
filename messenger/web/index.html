@@ -521,8 +521,23 @@ async function loadConvs() {
 function previewText(c) {
   if (!c.lastMessage) return 'Нет сообщений';
   const b = c.lastMessage.body || '';
-  if (b[0] === '{') {                       // конверт: дешифруется без привязки к активному диалогу
-    const p = decEnvelope(c.lastMessage.senderId, b);
+  if (b[0] === '{') {                       // конверт
+    // sealed-sender: senderId с сервера пуст → расшифровываем нашу копию ключами
+    // участников ИМЕННО этого диалога (decEnvelope опирался на senderId и для
+    // sealed всегда возвращал null → превью показывало «🔒 Сообщение» для всего).
+    let p = null;
+    try {
+      const obj = JSON.parse(b);
+      const mine = obj && obj.e && obj.e[me.id];
+      if (mine) {
+        const cands = [...(convParts[c.id] || []), { id: me.id, publicKey: myPubB64() }];
+        for (const cand of cands) {
+          if (!cand.publicKey) continue;
+          const d = e2eDec(cand.publicKey, mine);
+          if (d != null) { p = unpadPayload(d); break; }
+        }
+      }
+    } catch { return b; }
     if (p === null) return '🔒 Сообщение';
     try { const o = JSON.parse(p); if (o && o.k) return '📎 ' + (o.name || 'Файл'); } catch {}
     return p;
