@@ -241,8 +241,10 @@ interface YandexOrdersResponse {
 }
 
 // Форматирует дату в DD-MM-YYYY (формат параметра fromDate Partner API).
-// UTC-геттеры (НЕ локальные): иначе на UTC-сервере since у границы суток дал бы
-// fromDate, сдвинутый на день → пропуск/повтор заказов за сутки.
+// UTC-геттеры (НЕ локальные) — детерминированно, не зависит от TZ сервера.
+// ⚠️ Допущение: API трактует fromDate как UTC. Partner API исторически мог
+// ожидать МСК (UTC+3); у границы суток это даёт сдвиг на 1 день (повтор заказов,
+// гасится дедупом imported/*). Сверить на боевом кабинете при подключении.
 function formatYandexDate(d: Date): string {
   const dd = String(d.getUTCDate()).padStart(2, '0');
   const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
