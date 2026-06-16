@@ -91,9 +91,12 @@ export class FakeBatchStore implements BatchStore {
         (query.warehouseId === undefined || b.warehouseId === query.warehouseId),
     );
     if (order === 'received_asc') {
-      rows = rows.sort((a, b) => a.receivedAt - b.receivedAt || a.id.localeCompare(b.id));
+      // Тай-брейк по id — codepoint-сравнение (как ORDER BY id в SQLite/Postgres),
+      // НЕ локалезависимый localeCompare: иначе при одинаковом receivedAt (массовый
+      // импорт) JS-store выбрал бы другую партию, чем реальная БД → другая cost_price.
+      rows = rows.sort((a, b) => a.receivedAt - b.receivedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     } else if (order === 'received_desc') {
-      rows = rows.sort((a, b) => b.receivedAt - a.receivedAt || b.id.localeCompare(a.id));
+      rows = rows.sort((a, b) => b.receivedAt - a.receivedAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
     }
     return rows.map((b) => ({
       id: b.id,

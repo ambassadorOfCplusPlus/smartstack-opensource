@@ -160,7 +160,7 @@ export class SberAdapter implements MarketplaceAdapter {
         })
         .filter((it) => it.sku !== ''),
       raw: s,
-    }));
+    })).filter((o) => o.externalOrderId !== '');
   }
 }
 

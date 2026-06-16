@@ -87,8 +87,10 @@ export class OzonAdapter implements MarketplaceAdapter {
       const errors: string[] = [];
       let ok = 0;
       if (results.length === 0) {
-        // Нет детализации — считаем все принятыми.
-        ok = items.length;
+        // Пустой result при HTTP 200 — Ozon ничего НЕ подтвердил (частая причина:
+        // не указан/неверный warehouse_id). Не выдаём это за успех, иначе синк
+        // молча «обновит» всё, не изменив ничего, и замаскирует ошибку.
+        errors.push('Ozon остатки: пустой ответ (result=[]) — обновление не подтверждено');
       } else {
         for (const r of results) {
           if (r.updated && (!r.errors || r.errors.length === 0)) {
@@ -178,7 +180,7 @@ export class OzonAdapter implements MarketplaceAdapter {
         })
         .filter((it) => it.sku !== ''),
       raw: p,
-    }));
+    })).filter((o) => o.externalOrderId !== '');
   }
 
   // POST /v1/product/import/prices  {prices:[{offer_id, price}]}

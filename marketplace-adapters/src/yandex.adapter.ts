@@ -209,7 +209,7 @@ export class YandexAdapter implements MarketplaceAdapter {
         })
         .filter((it) => it.sku !== ''),
       raw: o,
-    }));
+    })).filter((o) => o.externalOrderId !== '');
   }
 }
 

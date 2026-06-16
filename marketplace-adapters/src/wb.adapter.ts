@@ -166,7 +166,7 @@ export class WbAdapter implements MarketplaceAdapter {
         items: sku ? [{ sku, quantity: 1, price }] : [],
         raw: o,
       };
-    });
+    }).filter((o) => o.externalOrderId !== '');
   }
 }
 
