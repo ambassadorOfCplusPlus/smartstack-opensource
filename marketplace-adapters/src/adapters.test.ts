@@ -355,21 +355,66 @@ describe('marketplaces adapters', () => {
     expect(calls[0].url).toBe('https://fake-prices.test/api/v2/upload/task');
   });
 
-  it('WB pushPrices: нечисловой externalId → errors, позиция пропущена', async () => {
-    const { fetchImpl, calls } = makeFakeFetch([{ ok: true, status: 200 }]);
+  it('WB pushPrices: externalId не nmID → резолв nmID по штрихкоду через Content API', async () => {
+    const { fetchImpl, calls } = makeFakeFetch([
+      // 1) Content API отдаёт карточку со штрихкодом BAR-2 → nmID 555.
+      {
+        ok: true,
+        status: 200,
+        json: { cards: [{ nmID: 555, sizes: [{ skus: ['BAR-2'] }] }], cursor: { total: 1 } },
+      },
+      // 2) discounts-prices upload/task.
+      { ok: true, status: 200 },
+    ]);
     const adapter = new WbAdapter(
       { platform: 'wb', apiKey: 'T', externalWarehouseId: '1' },
       { fetchImpl },
     );
     const res = await adapter.pushPrices([
-      { externalId: 'NOT_A_NUMBER', sku: 'S1', price: 10 },
-      { externalId: '42', sku: 'S2', price: 20 },
+      { externalId: '', sku: 'BAR-1', price: 10 }, // нет в карточках → error
+      { externalId: '', sku: 'BAR-2', price: 20 }, // резолвится в nmID 555
     ]);
-    // Валидная позиция отправлена, невалидная — в errors.
     expect(res.ok).toBe(1);
     expect(res.errors).toHaveLength(1);
-    expect(res.errors[0]).toContain('NOT_A_NUMBER');
-    expect(calls[0].body).toEqual({ data: [{ nmID: 42, price: 20 }] });
+    expect(res.errors[0]).toContain('BAR-1');
+    expect(calls[0].url).toBe('https://content-api.wildberries.ru/content/v2/get/cards/list');
+    expect(calls[1].url).toBe('https://discounts-prices-api.wildberries.ru/api/v2/upload/task');
+    expect(calls[1].body).toEqual({ data: [{ nmID: 555, price: 20 }] });
+  });
+
+  it('WB pushPrices: смешанно — прямой nmID + резолв по штрихкоду (contentBaseUrl override)', async () => {
+    const { fetchImpl, calls } = makeFakeFetch([
+      { ok: true, status: 200, json: { cards: [{ nmID: 555, sizes: [{ skus: ['BAR-2'] }] }] } },
+      { ok: true, status: 200 },
+    ]);
+    const adapter = new WbAdapter(
+      { platform: 'wb', apiKey: 'T', externalWarehouseId: '1' },
+      { fetchImpl, contentBaseUrl: 'https://fake-content.test' },
+    );
+    const res = await adapter.pushPrices([
+      { externalId: '100', sku: 'BAR-1', price: 10 }, // прямой nmID 100 (Content API не нужен для него)
+      { externalId: '', sku: 'BAR-2', price: 20 }, // резолв → 555
+    ]);
+    expect(res).toEqual({ ok: 2, errors: [] });
+    expect(calls[0].url).toBe('https://fake-content.test/content/v2/get/cards/list');
+    expect(calls[1].body).toEqual({ data: [{ nmID: 100, price: 10 }, { nmID: 555, price: 20 }] });
+  });
+
+  it('WB pushPrices: Content API недоступен → нерезолвенные в errors, прямые nmID отправлены', async () => {
+    const { fetchImpl } = makeFakeFetch([
+      { ok: false, status: 401, text: 'unauthorized' }, // cards/list упал
+      { ok: true, status: 200 }, // upload пройдёт для прямого nmID
+    ]);
+    const adapter = new WbAdapter(
+      { platform: 'wb', apiKey: 'T', externalWarehouseId: '1' },
+      { fetchImpl },
+    );
+    const res = await adapter.pushPrices([
+      { externalId: '100', sku: 'BAR-1', price: 10 }, // прямой nmID — отправится
+      { externalId: '', sku: 'BAR-2', price: 20 }, // резолв не вышел → error
+    ]);
+    expect(res.ok).toBe(1);
+    expect(res.errors.some((e) => e.includes('BAR-2'))).toBe(true);
   });
 
   it('WB pushPrices: HTTP-ошибка → errors', async () => {
