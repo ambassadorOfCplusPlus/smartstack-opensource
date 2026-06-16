@@ -100,7 +100,7 @@ QString encryptFor(const QString& recipientPubKeyB64, const QByteArray& plain) {
 QByteArray decryptFrom(const QString& senderPubKeyB64, const QString& boxB64, bool* ok) {
     if (ok) *ok = false;
 #ifdef SSM_E2E
-    if (!boxB64.startsWith(MARK)) { if (ok) *ok = true; return boxB64.toUtf8(); } // не наш формат — отдать как есть
+    if (!boxB64.startsWith(MARK)) return boxB64.toUtf8(); // не наш формат: НЕ аутентифицировано → ok остаётся false (важно для trial-decrypt: не атрибутируем автора по неаутентифицированной копии)
     if (!g_loaded || senderPubKeyB64.isEmpty()) return {};
     const QByteArray spk = b64d(senderPubKeyB64);
     if (spk.size() != crypto_box_PUBLICKEYBYTES) return {};

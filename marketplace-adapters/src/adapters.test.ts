@@ -228,8 +228,9 @@ describe('marketplaces adapters', () => {
       { platform: 'yandex', apiKey: 'K', clientId: 'camp-1' },
       { fetchImpl },
     );
-    // 9 марта 2026 → DD-MM-YYYY = 09-03-2026.
-    await adapter.fetchNewOrders(new Date(2026, 2, 9));
+    // 9 марта 2026 (UTC) → DD-MM-YYYY = 09-03-2026. Date.UTC — чтобы тест был
+    // независим от TZ сервера (formatYandexDate использует UTC-геттеры).
+    await adapter.fetchNewOrders(new Date(Date.UTC(2026, 2, 9)));
     expect(calls[0].url).toContain('&fromDate=09-03-2026');
   });
 
@@ -397,9 +398,9 @@ describe('marketplaces adapters', () => {
     // cutoff_to должен быть около now+60д (а не прежние +7д).
     expect(cutoffTo).toBeGreaterThanOrEqual(before + 59 * dayMs);
     expect(cutoffTo).toBeLessThanOrEqual(after + 61 * dayMs);
-    // cutoff_from ≈ now-1д.
-    expect(cutoffFrom).toBeLessThanOrEqual(before);
-    expect(cutoffFrom).toBeGreaterThanOrEqual(before - 2 * dayMs);
+    // cutoff_from ≈ now-30д (since в окно НЕ подмешивается — захват просроченных).
+    expect(cutoffFrom).toBeLessThanOrEqual(before - 29 * dayMs);
+    expect(cutoffFrom).toBeGreaterThanOrEqual(before - 31 * dayMs);
   });
 
   it('Ozon fetchNewOrders: пагинация — 2 страницы (100+30) → 130 заказов', async () => {
