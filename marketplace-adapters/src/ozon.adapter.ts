@@ -112,8 +112,21 @@ export class OzonAdapter implements MarketplaceAdapter {
   // Верхний предел ORDERS_MAX_PAGES страниц — защита от бесконечного цикла;
   // при достижении логируем предупреждение (выборка ограничена).
   async fetchNewOrders(since?: Date): Promise<RawOrder[]> {
-    const cutoffFrom = (since ?? new Date(Date.now() - 7 * 24 * 3600 * 1000)).toISOString();
-    const cutoffTo = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+    // ВАЖНО: cutoff_from/cutoff_to фильтруют СРОК ОТГРУЗКИ постинга (будущая дата),
+    // а НЕ время создания/обновления заказа. Поэтому окно нужно делать ШИРОКИМ,
+    // иначе необработанный постинг со сроком отгрузки дальше окна вообще не вернётся
+    // (старый баг: cutoff_to = now+7д прятал заказы с дальним дедлайном, а далёкий
+    // since задавал бессмысленное окно). Берём now-1д (или since, если он свежий)
+    // и now+60д, чтобы захватить все необработанные постинги. Повторную обработку
+    // уже импортированных заказов предотвращает идемпотентность (imported/*), а не
+    // это окно.
+    const dayMs = 24 * 3600 * 1000;
+    const wideFrom = Date.now() - dayMs;
+    const sinceMs = since ? since.getTime() : Number.NaN;
+    // since учитываем, только если он свежее, чем now-1д (иначе окно «уехало» бы назад).
+    const fromMs = Number.isFinite(sinceMs) && sinceMs > wideFrom ? sinceMs : wideFrom;
+    const cutoffFrom = new Date(fromMs).toISOString();
+    const cutoffTo = new Date(Date.now() + 60 * dayMs).toISOString();
 
     const allPostings: OzonPosting[] = [];
     let offset = 0;

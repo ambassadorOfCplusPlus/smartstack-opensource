@@ -220,6 +220,31 @@ describe('marketplaces adapters', () => {
     ]);
   });
 
+  it('Yandex fetchNewOrders: since добавляет &fromDate=DD-MM-YYYY', async () => {
+    const { fetchImpl, calls } = makeFakeFetch([
+      { ok: true, status: 200, json: { orders: [], pager: { pagesCount: 1 } } },
+    ]);
+    const adapter = new YandexAdapter(
+      { platform: 'yandex', apiKey: 'K', clientId: 'camp-1' },
+      { fetchImpl },
+    );
+    // 9 марта 2026 → DD-MM-YYYY = 09-03-2026.
+    await adapter.fetchNewOrders(new Date(2026, 2, 9));
+    expect(calls[0].url).toContain('&fromDate=09-03-2026');
+  });
+
+  it('Yandex fetchNewOrders: без since — параметр fromDate отсутствует', async () => {
+    const { fetchImpl, calls } = makeFakeFetch([
+      { ok: true, status: 200, json: { orders: [], pager: { pagesCount: 1 } } },
+    ]);
+    const adapter = new YandexAdapter(
+      { platform: 'yandex', apiKey: 'K', clientId: 'camp-1' },
+      { fetchImpl },
+    );
+    await adapter.fetchNewOrders();
+    expect(calls[0].url).not.toContain('fromDate');
+  });
+
   it('Yandex pushStocks: status=ERROR → ok:0 с сообщением площадки', async () => {
     const { fetchImpl } = makeFakeFetch([
       { ok: true, status: 200, json: { status: 'ERROR', errors: [{ message: 'bad sku' }] } },
@@ -355,6 +380,26 @@ describe('marketplaces adapters', () => {
     const res = await adapter.pushPrices([{ externalId: '42', sku: 'S', price: 10 }]);
     expect(res.ok).toBe(0);
     expect(res.errors[0]).toContain('HTTP 400');
+  });
+
+  it('Ozon fetchNewOrders: окно cutoff широкое (cutoff_to ≈ now+60д, охват дальних сроков отгрузки)', async () => {
+    const { fetchImpl, calls } = makeFakeFetch([
+      { ok: true, status: 200, json: { result: { postings: [] } } },
+    ]);
+    const adapter = new OzonAdapter({ platform: 'ozon', apiKey: 'K', clientId: 'C' }, { fetchImpl });
+    const before = Date.now();
+    await adapter.fetchNewOrders();
+    const after = Date.now();
+    const body = calls[0].body as { filter: { cutoff_from: string; cutoff_to: string } };
+    const dayMs = 24 * 3600 * 1000;
+    const cutoffTo = Date.parse(body.filter.cutoff_to);
+    const cutoffFrom = Date.parse(body.filter.cutoff_from);
+    // cutoff_to должен быть около now+60д (а не прежние +7д).
+    expect(cutoffTo).toBeGreaterThanOrEqual(before + 59 * dayMs);
+    expect(cutoffTo).toBeLessThanOrEqual(after + 61 * dayMs);
+    // cutoff_from ≈ now-1д.
+    expect(cutoffFrom).toBeLessThanOrEqual(before);
+    expect(cutoffFrom).toBeGreaterThanOrEqual(before - 2 * dayMs);
   });
 
   it('Ozon fetchNewOrders: пагинация — 2 страницы (100+30) → 130 заказов', async () => {

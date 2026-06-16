@@ -143,17 +143,21 @@ export class YandexAdapter implements MarketplaceAdapter {
 
   // GET /campaigns/{campaignId}/orders?status=PROCESSING&page=N
   // Пагинация по pager.pagesCount; верхний предел ORDERS_MAX_PAGES — защита от цикла.
-  async fetchNewOrders(_since?: Date): Promise<RawOrder[]> {
+  async fetchNewOrders(since?: Date): Promise<RawOrder[]> {
     const campaignId = this.campaignId();
     if (!campaignId) {
       throw new Error('Не указан clientId (campaignId магазина Яндекс.Маркет)');
     }
+    // Инкрементальная выборка: если задан since, добавляем &fromDate=DD-MM-YYYY
+    // (формат параметра — по документации Partner API, см. шапку файла).
+    const fromDateParam =
+      since != null ? `&fromDate=${formatYandexDate(since)}` : '';
     const all: YandexOrder[] = [];
     let page = 1;
     for (;;) {
       const url =
         `${this.baseUrl}/campaigns/${encodeURIComponent(campaignId)}/orders` +
-        `?status=PROCESSING&page=${page}&pageSize=${ORDERS_PAGE_LIMIT}`;
+        `?status=PROCESSING&page=${page}&pageSize=${ORDERS_PAGE_LIMIT}${fromDateParam}`;
       let res;
       try {
         res = await fetchWithRetry(
@@ -234,6 +238,14 @@ interface YandexOrder {
 interface YandexOrdersResponse {
   orders?: YandexOrder[];
   pager?: { pagesCount?: number; total?: number };
+}
+
+// Форматирует дату в DD-MM-YYYY (формат параметра fromDate Partner API).
+function formatYandexDate(d: Date): string {
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = String(d.getFullYear());
+  return `${dd}-${mm}-${yyyy}`;
 }
 
 export function createYandexAdapter(account: AdapterAccount, fetchImpl: FetchLike): YandexAdapter {

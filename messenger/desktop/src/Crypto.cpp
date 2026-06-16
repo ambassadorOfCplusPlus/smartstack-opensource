@@ -59,6 +59,10 @@ QString loadOrCreateKeys(const QString& keyFilePath) {
     g_loaded = true;
     g_myPub = b64e(QByteArray(reinterpret_cast<char*>(g_pk), crypto_box_PUBLICKEYBYTES));
     if (f.open(QIODevice::WriteOnly)) {
+        // Ужесточаем права: приватный ключ — только владелец (как EncryptionService
+        // в основном ERP). Иначе на общей машине секрет X25519 читают другие
+        // локальные пользователи → компрометация переписки.
+        f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
         f.write(QByteArray(reinterpret_cast<char*>(g_pk), crypto_box_PUBLICKEYBYTES).toBase64());
         f.write("\n");
         f.write(QByteArray(reinterpret_cast<char*>(g_sk), crypto_box_SECRETKEYBYTES).toBase64());
@@ -93,9 +97,10 @@ QString encryptFor(const QString& recipientPubKeyB64, const QByteArray& plain) {
 #endif
 }
 
-QByteArray decryptFrom(const QString& senderPubKeyB64, const QString& boxB64) {
+QByteArray decryptFrom(const QString& senderPubKeyB64, const QString& boxB64, bool* ok) {
+    if (ok) *ok = false;
 #ifdef SSM_E2E
-    if (!boxB64.startsWith(MARK)) return boxB64.toUtf8(); // не наш формат — отдать как есть
+    if (!boxB64.startsWith(MARK)) { if (ok) *ok = true; return boxB64.toUtf8(); } // не наш формат — отдать как есть
     if (!g_loaded || senderPubKeyB64.isEmpty()) return {};
     const QByteArray spk = b64d(senderPubKeyB64);
     if (spk.size() != crypto_box_PUBLICKEYBYTES) return {};
@@ -109,9 +114,11 @@ QByteArray decryptFrom(const QString& senderPubKeyB64, const QString& boxB64) {
                              reinterpret_cast<const unsigned char*>(nonce.constData()),
                              reinterpret_cast<const unsigned char*>(spk.constData()), g_sk) != 0)
         return {};
+    if (ok) *ok = true; // успех — даже если plaintext пустой (важно для trial-decrypt)
     return plain;
 #else
     Q_UNUSED(senderPubKeyB64);
+    if (ok) *ok = true;
     return boxB64.toUtf8();
 #endif
 }

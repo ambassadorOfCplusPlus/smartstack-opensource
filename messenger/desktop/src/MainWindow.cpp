@@ -256,8 +256,9 @@ QByteArray MainWindow::decMessage(const QString& senderId, const QString& body, 
     for (const auto& id : cands) {
         const QString pub = (id == m_selfId) ? Crypto::myPublicKey() : m_pubKeys.value(id);
         if (pub.isEmpty()) continue;
-        const QByteArray dec = Crypto::decryptFrom(pub, mine);
-        if (!dec.isEmpty()) { outSender = id; return unpadPayload(QString::fromUtf8(dec)).toUtf8(); }
+        bool ok = false;
+        const QByteArray dec = Crypto::decryptFrom(pub, mine, &ok);
+        if (ok) { outSender = id; return unpadPayload(QString::fromUtf8(dec)).toUtf8(); }
     }
     return {}; // не смогли расшифровать
 }

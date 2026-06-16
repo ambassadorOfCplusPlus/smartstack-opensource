@@ -118,6 +118,10 @@ export class SberAdapter implements MarketplaceAdapter {
   }
 
   // POST /api/market/v1/orderService/order/new → {data:{shipments:[...]}}
+  // _since не используется намеренно: эндпоint order/new сам по себе возвращает
+  // ТОЛЬКО новые отгрузки (уже обработанные сюда не попадают), инкрементальное
+  // окно по дате этим методом не поддерживается. Параметр оставлен для
+  // единообразия интерфейса MarketplaceAdapter.
   async fetchNewOrders(_since?: Date): Promise<RawOrder[]> {
     let res;
     try {

@@ -28,8 +28,10 @@ QString myPublicKey();
 QString encryptFor(const QString& recipientPubKeyB64, const QByteArray& plain);
 
 // Расшифровать пришедшее от отправителя (его публичный ключ base64).
-// boxB64 — base64(nonce+cipher). Возвращает открытый текст или пусто при ошибке.
-QByteArray decryptFrom(const QString& senderPubKeyB64, const QString& boxB64);
+// boxB64 — base64(nonce+cipher). Возвращает открытый текст; при ошибке — пусто.
+// ok (если задан) различает УСПЕХ (в т.ч. пустой plaintext) и ОШИБКУ/неверного
+// отправителя — нужно для trial-decrypt sealed-sender (пустой результат ≠ провал).
+QByteArray decryptFrom(const QString& senderPubKeyB64, const QString& boxB64, bool* ok = nullptr);
 
 // Зашифровано ли значение нашим форматом (есть префикс-маркер).
 bool isEncrypted(const QString& s);
