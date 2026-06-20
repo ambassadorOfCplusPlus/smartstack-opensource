@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "Навигатор по складу",
+    "slug": "warehouse-navigator",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "android": {
+      "package": "com.smartstack.warehousenavigator",
+      "permissions": ["CAMERA", "ACTIVITY_RECOGNITION"]
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        { "cameraPermission": "Доступ к камере нужен для сканирования QR-якорей склада." }
+      ]
+    ]
+  }
+}

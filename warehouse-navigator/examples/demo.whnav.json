@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "warehouse": { "id": "11111111-2222-3333-4444-555555555555", "name": "Демо-склад" },
+  "cells": [
+    { "id": "c1", "code": "A-01", "warehouseId": "11111111-2222-3333-4444-555555555555", "posXM": 2, "posYM": 1 },
+    { "id": "c2", "code": "A-02", "warehouseId": "11111111-2222-3333-4444-555555555555", "posXM": 2, "posYM": 4 },
+    { "id": "c3", "code": "B-01", "warehouseId": "11111111-2222-3333-4444-555555555555", "posXM": 6, "posYM": 4 }
+  ],
+  "products": [
+    { "id": "p1", "sku": "GAYKA-M6", "name": "Гайка М6", "barcode": "4600000000017" },
+    { "id": "p2", "sku": "BOLT-M8", "name": "Болт М8", "barcode": "4600000000024" }
+  ],
+  "placements": [
+    { "productId": "p1", "cellId": "c1", "quantity": 120 },
+    { "productId": "p1", "cellId": "c3", "quantity": 30 },
+    { "productId": "p2", "cellId": "c2", "quantity": 60 }
+  ],
+  "layout": [
+    { "xM": 4, "yM": 2.5, "lengthM": 6, "widthM": 0.8, "rotationDeg": 0, "kind": "rack" },
+    { "xM": 0, "yM": 2.5, "lengthM": 5, "widthM": 0.2, "rotationDeg": 90, "kind": "wall" }
+  ],
+  "anchors": [
+    { "warehouseId": "11111111-2222-3333-4444-555555555555", "xM": 0, "yM": 0, "headingDeg": 0 }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@smartstack/warehouse-navigator-server",
+  "version": "0.1.0",
+  "description": "Tiny LAN REST server for the warehouse navigator: serves warehouses, cells, products, product-location, layout and QR anchors to the mobile (APK) client over the local network. Node builtins only (http); pluggable WarehouseStore from the core. Runs as TypeScript on Node 24 (native type stripping).",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "start": "node src/cli.ts"
+  },
+  "dependencies": {
+    "@smartstack/warehouse-navigator-core": "file:../core"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
