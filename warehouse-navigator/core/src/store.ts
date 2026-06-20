@@ -56,7 +56,7 @@ export class InMemoryWarehouseStore implements WarehouseStore {
   private readonly warehouses = new Map<string, Warehouse>();
   private readonly cells = new Map<string, Cell[]>(); // warehouseId → cells
   private readonly products = new Map<string, Product>();
-  private placements: Placement[] = [];
+  private readonly placements = new Map<string, Placement[]>(); // warehouseId → placements
   private readonly layouts = new Map<string, LayoutRect[]>(); // warehouseId → rects
   private readonly anchors = new Map<string, NavAnchor[]>(); // warehouseId → anchors
 
@@ -71,11 +71,9 @@ export class InMemoryWarehouseStore implements WarehouseStore {
     this.layouts.set(s.warehouse.id, s.layout);
     this.anchors.set(s.warehouse.id, s.anchors);
     for (const p of s.products) this.products.set(p.id, p);
-    // Размещения других складов сохраняем, этого — заменяем.
-    const cellIds = new Set(this.cells.get(s.warehouse.id)?.map((c) => c.id));
-    this.placements = this.placements
-      .filter((pl) => !cellIds.has(pl.cellId))
-      .concat(s.placements);
+    // Размещения хранятся ПО СКЛАДУ: перезагрузка склада заменяет именно его
+    // размещения и не трогает чужие (и не зависит от совпадения id ячеек между складами).
+    this.placements.set(s.warehouse.id, s.placements);
   }
 
   async listWarehouses(): Promise<Warehouse[]> {
@@ -95,7 +93,7 @@ export class InMemoryWarehouseStore implements WarehouseStore {
     const cells = this.cells.get(warehouseId) ?? [];
     const cellById = new Map(cells.map((c) => [c.id, c]));
     const byCell = new Map<string, ProductLocation>();
-    for (const pl of this.placements) {
+    for (const pl of this.placements.get(warehouseId) ?? []) {
       if (pl.productId !== productId || pl.quantity <= 0) continue;
       const cell = cellById.get(pl.cellId);
       if (!cell) continue; // ячейка не этого склада
@@ -127,14 +125,12 @@ export class InMemoryWarehouseStore implements WarehouseStore {
   exportSnapshot(warehouseId: string): WarehouseSnapshot | null {
     const warehouse = this.warehouses.get(warehouseId);
     if (!warehouse) return null;
-    const cells = this.cells.get(warehouseId) ?? [];
-    const cellIds = new Set(cells.map((c) => c.id));
     return {
       version: 1,
       warehouse,
-      cells,
+      cells: this.cells.get(warehouseId) ?? [],
       products: [...this.products.values()],
-      placements: this.placements.filter((p) => cellIds.has(p.cellId)),
+      placements: this.placements.get(warehouseId) ?? [],
       layout: this.layouts.get(warehouseId) ?? [],
       anchors: this.anchors.get(warehouseId) ?? [],
     };

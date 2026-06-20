@@ -10,6 +10,12 @@
 
 namespace whnav {
 
+namespace {
+// Потолок на размер заголовков запроса: дальше — отбой (защита от зависания на
+// неполном/огромном запросе, который никогда не закончится «\r\n\r\n»).
+constexpr int kMaxHeaderBytes = 64 * 1024;
+} // namespace
+
 NavServer::NavServer(QObject* parent) : QObject(parent) {
     connect(&m_server, &QTcpServer::newConnection, this, &NavServer::onNewConnection);
 }
@@ -42,16 +48,28 @@ QStringList NavServer::lanAddresses() {
 void NavServer::onNewConnection() {
     while (QTcpSocket* sock = m_server.nextPendingConnection()) {
         connect(sock, &QTcpSocket::readyRead, this, [this, sock]() {
+            // Одно соединение обслуживаем один раз: после ответа сокет закрывается.
+            // Флаг защищает от повторного входа (keep-alive/догоняющие сегменты), пока
+            // disconnectFromHost ещё не завершился.
+            if (sock->property("ssHandled").toBool()) return;
             // Ждём конец заголовков. Для GET/OPTIONS тела нет — этого достаточно.
-            const QByteArray buf = sock->peek(8192);
+            const QByteArray buf = sock->peek(kMaxHeaderBytes);
             const int end = buf.indexOf("\r\n\r\n");
-            if (end < 0) return;
+            if (end < 0) {
+                // Заголовки переросли лимит, а конца нет — битый/враждебный запрос.
+                if (sock->bytesAvailable() > kMaxHeaderBytes) {
+                    sock->setProperty("ssHandled", true);
+                    sock->write("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n"
+                                "Connection: close\r\n\r\n");
+                    sock->disconnectFromHost();
+                }
+                return; // иначе ждём остаток заголовков
+            }
+            sock->setProperty("ssHandled", true);
             const QByteArray head = buf.left(end);
             const QString firstLine = QString::fromUtf8(head.left(head.indexOf("\r\n")));
             const QStringList parts = firstLine.split(' ');
-            const QString method = parts.value(0);
-            const QString path = parts.value(1);
-            handleRequest(sock, method, path);
+            handleRequest(sock, parts.value(0), parts.value(1));
         });
         connect(sock, &QTcpSocket::disconnected, sock, &QObject::deleteLater);
     }
@@ -70,7 +88,16 @@ void NavServer::handleRequest(QTcpSocket* sock, const QString& method, const QSt
     }
 
     int status = 200;
-    const QByteArray body = route(method, path, status);
+    QByteArray body;
+    // Исключения (например из JSON-разбора провайдера) НЕ должны вылетать из слота —
+    // в Qt это завершает процесс. Переводим в 500.
+    try {
+        body = route(method, path, status);
+    } catch (const std::exception& e) {
+        status = 500;
+        body = QByteArray("{\"error\":\"InternalError\"}");
+        emit log(QStringLiteral("Ошибка обработки %1: %2").arg(path, QString::fromUtf8(e.what())));
+    }
     const QByteArray reason = status == 200 ? "OK" : (status == 404 ? "Not Found" : "Bad Request");
     QByteArray resp = "HTTP/1.1 " + QByteArray::number(status) + " " + reason + "\r\n";
     resp += "Content-Type: application/json; charset=utf-8\r\n";
@@ -96,10 +123,11 @@ QByteArray NavServer::route(const QString& method, const QString& rawPath, int& 
         status = 404;
         return R"({"error":"NotFound"})";
     }
-    const Snapshot snap = m_provider();
 
-    // GET /api  (health)
+    // GET /api  (health) — отвечаем БЕЗ сбора снимка (провайдер обходит все таблицы GUI).
     if (seg.size() == 1) return R"({"ok":true})";
+
+    const Snapshot snap = m_provider();
 
     // GET /api/warehouses
     if (seg.size() == 2 && seg[1] == "warehouses") {

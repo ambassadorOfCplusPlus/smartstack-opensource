@@ -60,3 +60,36 @@ describe('InMemoryWarehouseStore', () => {
     expect(await store.productLocation('wh1', 'nope')).toEqual([]);
   });
 });
+
+describe('InMemoryWarehouseStore — изоляция складов', () => {
+  it('перезагрузка склада заменяет его размещения (нет осиротевших)', async () => {
+    const s = new InMemoryWarehouseStore();
+    s.loadSnapshot(snap); // p1: c1=8, c2=2
+    // Перезагружаем wh1 БЕЗ c2 и с единственным размещением на c1.
+    s.loadSnapshot({
+      ...snap,
+      cells: snap.cells.filter((c) => c.id !== 'c2'),
+      placements: [{ productId: 'p1', cellId: 'c1', quantity: 1 }],
+    });
+    const locs = await s.productLocation('wh1', 'p1');
+    expect(locs.map((l) => l.cellId)).toEqual(['c1']);
+    expect(locs[0]?.quantity).toBe(1); // старые 8/2 не «протекли»
+  });
+
+  it('склады с одинаковым id ячейки не затирают друг друга', async () => {
+    const mk = (wid: string, qty: number): WarehouseSnapshot => ({
+      version: 1,
+      warehouse: { id: wid, name: wid },
+      cells: [{ id: 'c1', code: 'X', warehouseId: wid, posXM: 0, posYM: 0 }],
+      products: [{ id: 'p', sku: 'p', name: 'p', barcode: null }],
+      placements: [{ productId: 'p', cellId: 'c1', quantity: qty }],
+      layout: [],
+      anchors: [],
+    });
+    const s = new InMemoryWarehouseStore();
+    s.loadSnapshot(mk('whA', 5));
+    s.loadSnapshot(mk('whB', 9));
+    expect((await s.productLocation('whA', 'p'))[0]?.quantity).toBe(5);
+    expect((await s.productLocation('whB', 'p'))[0]?.quantity).toBe(9);
+  });
+});

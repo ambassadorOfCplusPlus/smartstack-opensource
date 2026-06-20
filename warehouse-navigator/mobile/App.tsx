@@ -26,12 +26,17 @@ export default function App(): React.ReactElement {
   async function connectRemote(): Promise<void> {
     setBusy(true);
     try {
-      const s = new RemoteSource(url.trim().replace(/\/+$/, ''));
+      // Допишем схему, если пользователь ввёл «192.168.x.x:8088» без http://.
+      let base = url.trim().replace(/\/+$/, '');
+      if (base !== '' && !/^https?:\/\//i.test(base)) base = `http://${base}`;
+      const s = new RemoteSource(base);
       if (!(await s.ping())) {
         Alert.alert('Нет связи', 'Сервер не отвечает. Проверьте адрес и одну сеть Wi-Fi.');
         return;
       }
       setSource(s);
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось подключиться к серверу.');
     } finally {
       setBusy(false);
     }

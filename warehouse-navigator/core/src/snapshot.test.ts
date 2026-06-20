@@ -43,4 +43,36 @@ describe('snapshot codec', () => {
     const empty = { ...snap, layout: [], anchors: [], placements: [] };
     expect(parseSnapshot(JSON.stringify(empty)).layout).toEqual([]);
   });
+
+  it('layout: отсутствующие rotationDeg/kind → значения по умолчанию', () => {
+    const raw = { ...snap, layout: [{ xM: 1, yM: 2, lengthM: 3, widthM: 4 }] };
+    expect(parseSnapshot(JSON.stringify(raw)).layout[0]).toMatchObject({
+      rotationDeg: 0,
+      kind: 'rack',
+    });
+  });
+
+  it('layout: нечисловой rotationDeg / нестроковый kind → дефолты (а не падение)', () => {
+    const raw = {
+      ...snap,
+      layout: [{ xM: 1, yM: 2, lengthM: 3, widthM: 4, rotationDeg: 'x', kind: 5 }],
+    };
+    expect(parseSnapshot(JSON.stringify(raw)).layout[0]).toMatchObject({
+      rotationDeg: 0,
+      kind: 'rack',
+    });
+  });
+
+  it('ячейка чужого склада → SnapshotError (не молчаливая потеря)', () => {
+    const raw = {
+      ...snap,
+      cells: [{ id: 'c1', code: 'A', warehouseId: 'OTHER', posXM: 1, posYM: 2 }],
+    };
+    expect(() => parseSnapshot(JSON.stringify(raw))).toThrow(/складу/);
+  });
+
+  it('отрицательное количество → SnapshotError', () => {
+    const raw = { ...snap, placements: [{ productId: 'p1', cellId: 'c1', quantity: -1 }] };
+    expect(() => parseSnapshot(JSON.stringify(raw))).toThrow(SnapshotError);
+  });
 });

@@ -68,7 +68,12 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
 
   const headingRef = useRef<number>(0);
   const accelRef = useRef<{ x: number; y: number; z: number } | null>(null);
+  // План склада в ДВУХ местах: ref читает обработчик шага без ре-рендера, state
+  // перерисовывает карту, когда план догрузился (мутация ref сама рендер не вызывает).
   const rectsRef = useRef<LayoutRect[]>([]);
+  const [rects, setRects] = useState<LayoutRect[]>([]);
+  // Замок против многократного onBarcodeScanned (камера шлёт кадры пачкой).
+  const scanLockRef = useRef(false);
 
   // ── Поиск товара (простой дебаунс) ────────────────────────────────────────────────
   useEffect(() => {
@@ -77,10 +82,17 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
       setResults([]);
       return;
     }
+    let cancelled = false;
     const id = setTimeout(() => {
-      source.searchProducts(q).then(setResults).catch(() => setResults([]));
+      source
+        .searchProducts(q)
+        .then((r) => !cancelled && setResults(r))
+        .catch(() => !cancelled && setResults([]));
     }, 250);
-    return () => clearTimeout(id);
+    return () => {
+      cancelled = true;
+      clearTimeout(id);
+    };
   }, [search, product, source]);
 
   // ── Локации товара + план склада (после выбора товара и якоря) ──────────────────────
@@ -94,10 +106,14 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
     source
       .layout(anchor.warehouseId)
       .then((r) => {
-        rectsRef.current = r;
+        if (cancelled) return;
+        rectsRef.current = r; // для обработчика шага (map-matching)
+        setRects(r); // для перерисовки карты
       })
       .catch(() => {
+        if (cancelled) return;
         rectsRef.current = [];
+        setRects([]);
       });
     return () => {
       cancelled = true;
@@ -216,13 +232,20 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
   }, [anchor]);
 
   function onScan({ data }: { data: string }): void {
+    if (scanLockRef.current) return; // уже обработали кадр этой сессии сканирования
     const parsed = parseAnchor(data);
     if (!parsed) return; // не наш QR — игнор
+    scanLockRef.current = true;
     headingRef.current = parsed.headingDeg;
     setAnchor(parsed);
     setLivePos(parsed);
     setScanning(false);
     setPdrMeters(0);
+  }
+
+  function startScanning(): void {
+    scanLockRef.current = false; // разрешить новый скан
+    setScanning(true);
   }
 
   const route = useMemo(() => {
@@ -292,7 +315,7 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
             autoCorrect={false}
           />
         )}
-        <Pressable style={styles.rescanBtn} onPress={() => setScanning(true)}>
+        <Pressable style={styles.rescanBtn} onPress={startScanning}>
           <Text style={styles.btnText}>Скан</Text>
         </Pressable>
       </View>
@@ -312,7 +335,7 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
       ) : null}
 
       <WarehouseMap
-        rects={rectsRef.current}
+        rects={rects}
         cells={locations}
         pose={livePos ?? anchor}
         targetCellId={route?.target.cellId ?? null}
@@ -364,30 +387,29 @@ function WarehouseMap(props: {
 
   // Границы сцены по всем точкам (ячейки, стеллажи, поза) + поля.
   const bounds = useMemo(() => {
-    const xs: number[] = [];
-    const ys: number[] = [];
+    // Инкрементальные min/max (без Math.min(...spread): на большом плане спред
+    // переполнил бы стек аргументов).
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    const acc = (x: number, y: number): void => {
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    };
     for (const c of cells) {
-      if (c.posXM !== null && c.posYM !== null) {
-        xs.push(c.posXM);
-        ys.push(c.posYM);
-      }
+      if (c.posXM !== null && c.posYM !== null) acc(c.posXM, c.posYM);
     }
     for (const r of rects) {
-      xs.push(r.xM - r.lengthM, r.xM + r.lengthM);
-      ys.push(r.yM - r.widthM, r.yM + r.widthM);
+      acc(r.xM - r.lengthM, r.yM - r.widthM);
+      acc(r.xM + r.lengthM, r.yM + r.widthM);
     }
-    if (pose) {
-      xs.push(pose.xM);
-      ys.push(pose.yM);
-    }
-    if (xs.length === 0) return { minX: -1, maxX: 1, minY: -1, maxY: 1 };
+    if (pose) acc(pose.xM, pose.yM);
+    if (!Number.isFinite(minX)) return { minX: -1, maxX: 1, minY: -1, maxY: 1 };
     const pad = 1.5;
-    return {
-      minX: Math.min(...xs) - pad,
-      maxX: Math.max(...xs) + pad,
-      minY: Math.min(...ys) - pad,
-      maxY: Math.max(...ys) + pad,
-    };
+    return { minX: minX - pad, maxX: maxX + pad, minY: minY - pad, maxY: maxY + pad };
   }, [rects, cells, pose]);
 
   const { width, height } = size;

@@ -16,14 +16,24 @@ export interface NavDataSource {
   layout(warehouseId: string): Promise<LayoutRect[]>;
 }
 
+// Таймаут сетевого запроса (мс): без него «тихий» хост (не та сеть/фаервол) подвесил
+// бы экран навсегда (кнопка «Подключение…» не разблокировалась бы).
+const REQUEST_TIMEOUT_MS = 8000;
+
 // ЖИВОЙ режим: HTTP к LAN-серверу (см. ../server). baseUrl вида http://192.168.x.x:8088.
 export class RemoteSource implements NavDataSource {
   constructor(private readonly baseUrl: string) {}
 
   private async get<T>(path: string): Promise<T> {
-    const r = await fetch(`${this.baseUrl}${path}`);
-    if (!r.ok) throw new Error(`Сервер ответил ${r.status}`);
-    return (await r.json()) as T;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const r = await fetch(`${this.baseUrl}${path}`, { signal: ctrl.signal });
+      if (!r.ok) throw new Error(`Сервер ответил ${r.status}`);
+      return (await r.json()) as T;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async searchProducts(q: string): Promise<Product[]> {

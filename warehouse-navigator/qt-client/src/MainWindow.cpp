@@ -30,8 +30,11 @@ QString cell(const QTableWidget* t, int r, int c) {
     return it ? it->text().trimmed() : QString();
 }
 
-QString newId(const QString& prefix) {
-    return prefix + "_" + QUuid::createUuid().toString(QUuid::WithoutBraces).left(8);
+// ID склада ОБЯЗАН быть полным UUID: мобильный parseAnchor валидирует второе поле
+// QR-якоря по UUID-регэкспу и отвергает любой иной формат (иначе скан не привязывает
+// позицию). Полный canonical UUID без фигурных скобок.
+QString newWarehouseId() {
+    return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
 // Кнопки добавить/удалить строку под таблицей.
@@ -58,7 +61,7 @@ QWidget* tableWithButtons(QTableWidget* t, const std::function<void()>& onAdd) {
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
-    m_warehouseId = newId("wh");
+    m_warehouseId = newWarehouseId();
     buildUi();
     // Сервер всегда отдаёт АКТУАЛЬНЫЙ снимок из таблиц.
     m_server.setProvider([this]() { return collectSnapshot(); });
@@ -230,7 +233,7 @@ Snapshot MainWindow::collectSnapshot() const {
 }
 
 void MainWindow::loadSnapshot(const Snapshot& s) {
-    m_warehouseId = s.warehouse.id.isEmpty() ? newId("wh") : s.warehouse.id;
+    m_warehouseId = s.warehouse.id.isEmpty() ? newWarehouseId() : s.warehouse.id;
     m_warehouseName->setText(s.warehouse.name);
 
     QHash<QString, QString> codeByCellId, skuByProdId;

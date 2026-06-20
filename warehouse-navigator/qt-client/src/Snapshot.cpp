@@ -180,11 +180,12 @@ QVector<ProductLocation> Snapshot::productLocation(const QString& productId) con
 
 QString Snapshot::anchorPayload(const Anchor& a) {
     // Формат строго совпадает с core/parseAnchor: SSNAV1|warehouseId|xM|yM|headingDeg.
-    return QString("SSNAV1|%1|%2|%3|%4")
-        .arg(a.warehouseId)
-        .arg(a.xM)
-        .arg(a.yM)
-        .arg(a.headingDeg);
+    // Числа форматируем ЯВНО через QString::number (всегда C-локаль, разделитель «.»):
+    // мобильный parser делает Number(поле), а «2,5» из локалезависимого вывода стал бы
+    // NaN и якорь не распознался бы на русской системе.
+    const auto n = [](double v) { return QString::number(v, 'g', 12); };
+    return QStringLiteral("SSNAV1|%1|%2|%3|%4")
+        .arg(a.warehouseId, n(a.xM), n(a.yM), n(a.headingDeg));
 }
 
 } // namespace whnav

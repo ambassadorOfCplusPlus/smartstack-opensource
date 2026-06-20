@@ -56,6 +56,8 @@ export function parseSnapshot(text: string): WarehouseSnapshot {
   const cells = arr(raw.cells, 'cells').map((c, i) => {
     if (!isObject(c) || !str(c.id) || !str(c.code) || !str(c.warehouseId))
       throw new SnapshotError(`Некорректная ячейка #${i}`);
+    if (c.warehouseId !== wid)
+      throw new SnapshotError(`Ячейка #${i} принадлежит другому складу`); // иначе молча терялась бы
     if (!numOrNull(c.posXM) || !numOrNull(c.posYM))
       throw new SnapshotError(`Некорректные координаты ячейки #${i}`);
     return {
@@ -78,6 +80,7 @@ export function parseSnapshot(text: string): WarehouseSnapshot {
   const placements = arr(raw.placements, 'placements').map((pl, i) => {
     if (!isObject(pl) || !str(pl.productId) || !str(pl.cellId) || !num(pl.quantity))
       throw new SnapshotError(`Некорректное размещение #${i}`);
+    if (pl.quantity < 0) throw new SnapshotError(`Отрицательное количество в размещении #${i}`);
     return { productId: pl.productId, cellId: pl.cellId, quantity: pl.quantity };
   });
 

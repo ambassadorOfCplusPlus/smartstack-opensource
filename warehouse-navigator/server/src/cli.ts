@@ -14,12 +14,22 @@ import {
 import { createNavServer } from './server.ts';
 
 const port = Number(process.env.PORT ?? 8088);
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  console.error(`Неверный PORT: ${process.env.PORT}. Ожидается целое 1..65535.`);
+  process.exit(1);
+}
 const file = process.argv[2];
 
 const store = new InMemoryWarehouseStore();
 if (file) {
-  store.loadSnapshot(parseSnapshot(readFileSync(file, 'utf8')));
-  console.log(`Загружен снимок склада: ${file}`);
+  // Битый/чужой/отсутствующий файл — понятная ошибка, а не сырой stack trace.
+  try {
+    store.loadSnapshot(parseSnapshot(readFileSync(file, 'utf8')));
+    console.log(`Загружен снимок склада: ${file}`);
+  } catch (e) {
+    console.error(`Не удалось загрузить снимок «${file}»: ${(e as Error).message}`);
+    process.exit(1);
+  }
 } else {
   console.log('Снимок не задан — пусто. Загрузите через POST /api/snapshot или укажите файл.');
 }
