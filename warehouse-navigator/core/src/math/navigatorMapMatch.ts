@@ -14,7 +14,9 @@ export interface MapRect {
   kind?: string;
 }
 
-const OBSTACLE_KINDS = new Set(['rack', 'wall']);
+// Проходимы: zone/passage/door. Препятствия (через них нельзя идти и нельзя
+// «целиться» стрелкой) — rack/wall. Экспортируется для navigatorGuidance.
+export const OBSTACLE_KINDS = new Set(['rack', 'wall']);
 
 interface Box {
   minX: number;

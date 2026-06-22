@@ -4,7 +4,7 @@
 // магнитных аномалий), поза выталкивается из стеллажей по плану (map-matching). Вся
 // математика — из @smartstack/warehouse-navigator-core; здесь только UI и датчики.
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   SafeAreaView,
   View,
@@ -19,8 +19,11 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Accelerometer, Gyroscope, Magnetometer, Pedometer } from 'expo-sensors';
 import {
   parseAnchor,
-  computeRoute,
+  guidanceRoute,
   nearestMappedCell,
+  makeArReference,
+  arPose,
+  fuseOpticalIntoPdr,
   stepDelta,
   magnitude3,
   isMagneticAnomaly,
@@ -43,8 +46,11 @@ import {
   type Product,
   type ProductLocation,
   type LayoutRect,
+  type ArSample,
+  type ArReference,
 } from '@smartstack/warehouse-navigator-core';
 import type { NavDataSource } from './datasource';
+import { ArCameraTracker } from './ArScene';
 
 interface Props {
   source: NavDataSource;
@@ -65,6 +71,19 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
   const [pdrMeters, setPdrMeters] = useState(0);
   const [pedometerAvailable, setPedometerAvailable] = useState<boolean | null>(null);
   const [mapSize, setMapSize] = useState({ width: 0, height: 0 });
+  // Оптика (ARCore/ARKit через ViroReact) — ПОСТОЯННЫЙ фоновый корректор дрейфа PDR
+  // (фузия, не отдельный режим): трекер смонтирован всё время, пока есть якорь, и
+  // непрерывно выправляет счисление, когда видит ориентиры. `cameraView` — лишь выбор
+  // ПОКАЗА (камера-просмотр ↔ карта), он не включает/выключает саму фузию.
+  // Требует dev build (см. ArScene/README); в Expo Go оптики нет — остаётся чистый PDR.
+  const [cameraView, setCameraView] = useState(false);
+  const arRefRef = useRef<ArReference | null>(null); // AR-референс, зафиксированный по якорю
+  const livePosRef = useRef<NavAnchor | null>(null); // АВТОРИТЕТНАЯ поза (PDR+оптика пишут синхронно)
+  const trackingRef = useRef(false); // надёжен ли оптический трекинг (гейт фузии)
+  const lastPublishMsRef = useRef(0); // троттлинг setLivePos (AR-кадры идут 30–60 Гц)
+  const lastPublishedRef = useRef<NavAnchor | null>(null); // последняя отрисованная поза (гейт по движению)
+  const opticalNoteRef = useRef<string | null>(null); // текущий текст индикатора (анти-дребезг)
+  const [opticalNote, setOpticalNote] = useState<string | null>(null); // индикатор работы оптики
 
   const headingRef = useRef<number>(0);
   const accelRef = useRef<{ x: number; y: number; z: number } | null>(null);
@@ -120,7 +139,93 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
     };
   }, [anchor, product, source]);
 
+  // Текст индикатора — только при РЕАЛЬНОЙ смене (анти-дребезг ре-рендера).
+  const setNote = useCallback((note: string | null) => {
+    if (note === opticalNoteRef.current) return;
+    opticalNoteRef.current = note;
+    setOpticalNote(note);
+  }, []);
+
+  // Единая публикация позы: livePosRef обновляется СИНХРОННО (авторитетный источник
+  // для PDR и оптики — нет рассинхрона/гонки двух писателей), а setLivePos (ре-рендер)
+  // троттлится. AR-кадры идут 30–60 Гц — без троттла это был бы шторм перерисовок всей
+  // карты. force=true для шагов PDR и жёстких снапов оптики (рисуем сразу).
+  const publishPose = useCallback((pose: NavAnchor, force = false) => {
+    livePosRef.current = pose;
+    const now = Date.now();
+    if (!force && now - lastPublishMsRef.current < 90) return; // ~11 Гц рендера
+    const lp = lastPublishedRef.current;
+    const moved =
+      !lp ||
+      Math.hypot(pose.xM - lp.xM, pose.yM - lp.yM) > 0.02 ||
+      Math.abs(pose.headingDeg - lp.headingDeg) > 0.5;
+    if (!force && !moved) return; // стоим на месте — не перерисовываем (джиттер оптики гасим)
+    lastPublishMsRef.current = now;
+    lastPublishedRef.current = pose;
+    setLivePos(pose);
+  }, []);
+
+  // ── Оптика выправляет дрейф PDR (ARCore/ARKit) ──────────────────────────────────────
+  // Сырой замер позы камеры → дрейф-свободная оптическая поза склада (makeArReference на
+  // первом замере после якоря, дальше arPose). Затем ФУЗИЯ: оптика мягко подтягивает
+  // позу PDR к себе, а при крупном (видимом оптикой) дрейфе выправляет жёстко. PDR при
+  // этом продолжает работать (основа), оптика — корректор. Результат выталкиваем из
+  // стеллажей по плану, как и шаги PDR.
+  // Качество оптического трекинга от ViroReact — гейт фузии.
+  const onTracking = useCallback(
+    (normal: boolean) => {
+      trackingRef.current = normal;
+      if (!normal) setNote('оптика не видит ориентиров — ведёт PDR');
+    },
+    [setNote],
+  );
+
+  const onArSample = useCallback(
+    (s: ArSample) => {
+      if (anchor === null) return;
+      if (!trackingRef.current) return; // нет надёжного трекинга — PDR не трогаем
+      let ref = arRefRef.current;
+      if (ref === null) {
+        ref = makeArReference(anchor, s);
+        arRefRef.current = ref;
+      }
+      const optical = arPose(anchor, ref, s);
+      const base = livePosRef.current ?? optical;
+      const fused = fuseOpticalIntoPdr(
+        { xM: base.xM, yM: base.yM, headingDeg: base.headingDeg },
+        { xM: optical.xM, yM: optical.yM, headingDeg: optical.headingDeg },
+      );
+      const snapped = snapOutOfObstacles(
+        { xM: fused.pose.xM, yM: fused.pose.yM },
+        rectsRef.current,
+        0,
+      );
+      headingRef.current = fused.pose.headingDeg; // PDR продолжит с выправленного оптикой курса
+      publishPose(
+        {
+          warehouseId: anchor.warehouseId,
+          xM: snapped.xM,
+          yM: snapped.yM,
+          headingDeg: fused.pose.headingDeg,
+        },
+        fused.snapped, // жёсткий снап — рисуем немедленно
+      );
+      if (fused.snapped) {
+        setNote(`оптика выправила дрейф ${fused.driftM.toFixed(1)} м`);
+        setPdrMeters(0); // дрейф сброшен — счётчик «пройдено по датчикам» обнуляем
+      } else if (fused.driftM > 0.5) {
+        setNote('оптика подстраивает позицию'); // без числа — иначе дребезг ре-рендера
+      } else {
+        setNote('оптика держит позицию');
+      }
+    },
+    [anchor, publishPose, setNote],
+  );
+
   // ── Счисление по датчикам (PDR) ────────────────────────────────────────────────────
+  // Работает ВСЕГДА (основа позы), в т.ч. при включённой оптике: оптика лишь выправляет
+  // его дрейф (см. onArSample). Так при потере оптического трекинга (глухая стена, тьма)
+  // навигация не замирает — PDR ведёт дальше, оптика до-выправит, когда снова увидит.
   useEffect(() => {
     if (anchor === null) return;
     let cancelled = false;
@@ -205,16 +310,21 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
           }
           const heading = headingRef.current;
           const { dx, dy } = stepDelta(heading, dist);
-          setLivePos((prev) => {
-            if (prev === null) return prev;
+          // Читаем АВТОРИТЕТНУЮ позу из ref (её мог только что поправить кадр оптики) —
+          // не из state, иначе шаг затёр бы коррекцию оптики (гонка двух писателей).
+          const prev = livePosRef.current;
+          if (prev !== null) {
             const snapped = snapOutOfObstacles(
               { xM: prev.xM + dx, yM: prev.yM + dy },
               rectsRef.current,
               0,
               { xM: prev.xM, yM: prev.yM },
             );
-            return { ...prev, xM: snapped.xM, yM: snapped.yM, headingDeg: heading };
-          });
+            publishPose(
+              { ...prev, xM: snapped.xM, yM: snapped.yM, headingDeg: heading },
+              true, // шаг — событие редкое, рисуем сразу
+            );
+          }
           setPdrMeters((m) => m + dist);
         });
       })
@@ -229,7 +339,7 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
       gyroSub.remove();
       pedoSub?.remove();
     };
-  }, [anchor]);
+  }, [anchor, publishPose]);
 
   function onScan({ data }: { data: string }): void {
     if (scanLockRef.current) return; // уже обработали кадр этой сессии сканирования
@@ -237,6 +347,9 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
     if (!parsed) return; // не наш QR — игнор
     scanLockRef.current = true;
     headingRef.current = parsed.headingDeg;
+    arRefRef.current = null; // AR заново зафиксирует референс по новому якорю
+    livePosRef.current = parsed; // авторитетная поза сразу (PDR/оптика стартуют отсюда)
+    lastPublishedRef.current = parsed;
     setAnchor(parsed);
     setLivePos(parsed);
     setScanning(false);
@@ -253,8 +366,11 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
     if (!pose) return null;
     const { target } = nearestMappedCell(pose, locations);
     if (!target) return null;
-    return { ...computeRoute(pose, target), target };
-  }, [livePos, anchor, locations]);
+    // Стрелка выправляется по плану склада: если прямая на ячейку упирается в
+    // стеллаж/стену — направление отклоняется в сторону прохода (далёкие препятствия
+    // игнорируются). Без плана (rects пуст) — поведение прежнее (прямая на цель).
+    return { ...guidanceRoute(pose, target, rects), target };
+  }, [livePos, anchor, locations, rects]);
 
   if (!permission) return <Centered text="Запрос доступа к камере…" />;
   if (!permission.granted) {
@@ -315,6 +431,12 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
             autoCorrect={false}
           />
         )}
+        <Pressable
+          style={[styles.rescanBtn, cameraView ? styles.arBtnOn : null]}
+          onPress={() => setCameraView((v) => !v)}
+        >
+          <Text style={styles.btnText}>{cameraView ? '🗺 Карта' : '📷 Камера'}</Text>
+        </Pressable>
         <Pressable style={styles.rescanBtn} onPress={startScanning}>
           <Text style={styles.btnText}>Скан</Text>
         </Pressable>
@@ -334,19 +456,43 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
         />
       ) : null}
 
-      <WarehouseMap
-        rects={rects}
-        cells={locations}
-        pose={livePos ?? anchor}
-        targetCellId={route?.target.cellId ?? null}
-        onLayout={(e: LayoutChangeEvent) =>
-          setMapSize({
-            width: e.nativeEvent.layout.width,
-            height: e.nativeEvent.layout.height,
-          })
-        }
-        size={mapSize}
-      />
+      <View style={styles.mapArea}>
+        {/* Оптика — ПОСТОЯННЫЙ фоновый корректор: трекер смонтирован, пока есть якорь,
+            и в режиме карты (под ней), и в просмотре-камере. Карта (непрозрачная) лежит
+            поверх и скрывает камеру; в просмотре вместо карты — прозрачный оверлей. */}
+        {anchor !== null ? (
+          <View style={StyleSheet.absoluteFill} pointerEvents="none">
+            <ArCameraTracker onSample={onArSample} onTracking={onTracking} />
+          </View>
+        ) : null}
+
+        {cameraView ? (
+          <View style={styles.arOverlay} pointerEvents="none">
+            {route ? (
+              <View
+                style={[styles.arChevron, { transform: [{ rotate: `${route.relativeDeg}deg` }] }]}
+              />
+            ) : (
+              <Text style={styles.arHint}>Найдите товар — покажу направление</Text>
+            )}
+          </View>
+        ) : (
+          <WarehouseMap
+            rects={rects}
+            cells={locations}
+            pose={livePos ?? anchor}
+            targetCellId={route?.target.cellId ?? null}
+            guidanceBearingDeg={route?.bearingDeg ?? null}
+            onLayout={(e: LayoutChangeEvent) =>
+              setMapSize({
+                width: e.nativeEvent.layout.width,
+                height: e.nativeEvent.layout.height,
+              })
+            }
+            size={mapSize}
+          />
+        )}
+      </View>
 
       <View style={styles.footer}>
         {route ? (
@@ -355,18 +501,23 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
             <Text style={styles.dist}>
               до ячейки {route.target.code}: {route.distanceM.toFixed(1)} м
             </Text>
+            {route.deflected ? (
+              <Text style={styles.hint}>↪ обхожу препятствие по плану склада</Text>
+            ) : null}
           </>
         ) : (
           <Text style={styles.dist}>
             {product ? 'Ячейка товара не размечена на карте' : 'Найдите товар для маршрута'}
           </Text>
         )}
+        {opticalNote ? <Text style={styles.hint}>📷 {opticalNote}</Text> : null}
         {pedometerAvailable === false ? (
           <Text style={styles.warn}>Шагомер недоступен — позиция только по сканам QR</Text>
         ) : null}
         {pdrMeters > PDR_RESCAN_HINT_M ? (
           <Text style={styles.warn}>
             пройдено {pdrMeters.toFixed(0)} м по датчикам — пересканируйте якорь
+            {' '}(или наведите камеру на проход — оптика выправит)
           </Text>
         ) : null}
       </View>
@@ -380,10 +531,11 @@ function WarehouseMap(props: {
   cells: ProductLocation[];
   pose: NavAnchor | null;
   targetCellId: string | null;
+  guidanceBearingDeg: number | null;
   size: { width: number; height: number };
   onLayout: (e: LayoutChangeEvent) => void;
 }): React.ReactElement {
-  const { rects, cells, pose, targetCellId, size, onLayout } = props;
+  const { rects, cells, pose, targetCellId, guidanceBearingDeg, size, onLayout } = props;
 
   // Границы сцены по всем точкам (ячейки, стеллажи, поза) + поля.
   const bounds = useMemo(() => {
@@ -464,6 +616,16 @@ function WarehouseMap(props: {
           )
         : null}
 
+      {/* Стрелка-маршрут (зелёная) — КУДА идти: выправлена по плану (обход стен).
+          Рисуется под маркером «вы здесь», чтобы синяя стрелка-курс была сверху. */}
+      {width > 0 && pose && guidanceBearingDeg !== null ? (
+        <View style={[styles.you, { left: sx(pose.xM) - 8, top: sy(pose.yM) - 8 }]}>
+          <View
+            style={[styles.guideArrow, { transform: [{ rotate: `${guidanceBearingDeg}deg` }] }]}
+          />
+        </View>
+      ) : null}
+
       {width > 0 && pose ? (
         <View
           style={[
@@ -532,10 +694,31 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 11,
   },
+  arBtnOn: { backgroundColor: '#2f855a' },
+  arOverlay: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' },
+  arChevron: {
+    width: 0,
+    height: 0,
+    borderLeftWidth: 26,
+    borderRightWidth: 26,
+    borderBottomWidth: 52,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderBottomColor: 'rgba(47,133,90,0.92)',
+  },
+  arHint: {
+    color: '#fff',
+    fontSize: 15,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
   results: { maxHeight: 200, marginHorizontal: 10 },
   resultRow: { paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#eee' },
   resultName: { fontSize: 15, color: '#111' },
   resultSku: { fontSize: 12, color: '#888' },
+  mapArea: { flex: 1 },
   map: { flex: 1, margin: 10, backgroundColor: '#f7fafc', borderRadius: 8, overflow: 'hidden' },
   rack: { position: 'absolute', borderRadius: 2 },
   cell: { position: 'absolute', width: 10, height: 10, borderRadius: 5 },
@@ -550,9 +733,22 @@ const styles = StyleSheet.create({
     borderRightColor: 'transparent',
     borderBottomColor: '#2b6cb0',
   },
+  // Стрелка-маршрут (куда идти, выправлена по плану) — крупнее и зелёная, чтобы
+  // отличаться от синей стрелки-курса (куда смотрит телефон).
+  guideArrow: {
+    width: 0,
+    height: 0,
+    borderLeftWidth: 9,
+    borderRightWidth: 9,
+    borderBottomWidth: 20,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderBottomColor: '#2f855a',
+  },
   footer: { padding: 14, borderTopWidth: 1, borderTopColor: '#eee', gap: 2 },
   turn: { fontSize: 18, fontWeight: '700', color: '#111' },
   dist: { fontSize: 14, color: '#555' },
+  hint: { fontSize: 12, color: '#2f855a', marginTop: 2 },
   warn: { fontSize: 12, color: '#c05621', marginTop: 4 },
   btn: { backgroundColor: '#2b6cb0', borderRadius: 8, paddingHorizontal: 18, paddingVertical: 12 },
   btnGhost: { backgroundColor: 'rgba(0,0,0,0.5)' },

@@ -5,6 +5,7 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
+    "splash": { "backgroundColor": "#ffffff" },
     "android": {
       "package": "com.smartstack.warehousenavigator",
       "permissions": ["CAMERA", "ACTIVITY_RECOGNITION"]
@@ -13,6 +14,13 @@
       [
         "expo-camera",
         { "cameraPermission": "Доступ к камере нужен для сканирования QR-якорей склада." }
+      ],
+      [
+        "@reactvision/react-viro",
+        {
+          "android": { "xRMode": ["AR"] },
+          "ios": { "cameraUsagePermission": "Доступ к камере нужен для AR-навигации по складу." }
+        }
       ]
     ]
   }

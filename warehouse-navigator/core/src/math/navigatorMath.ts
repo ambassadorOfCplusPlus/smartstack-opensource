@@ -229,6 +229,17 @@ export interface RouteInfo {
   turnText: string;
 }
 
+// Подсказка поворота по относительному углу к цели (-180..180, + = направо).
+// Единый источник формулировок для прямого маршрута (computeRoute) и маршрута с
+// обходом препятствий (navigatorGuidance) — чтобы тексты не разошлись.
+export function turnTextForRelative(rel: number): string {
+  const a = Math.abs(rel);
+  if (a < 15) return 'Идите прямо';
+  if (a > 165) return 'Развернитесь назад';
+  if (rel > 0) return a > 60 ? 'Поверните направо' : 'Возьмите правее';
+  return a > 60 ? 'Поверните налево' : 'Возьмите левее';
+}
+
 export function computeRoute(
   anchor: NavAnchor,
   target: { posXM: number; posYM: number },
@@ -240,13 +251,7 @@ export function computeRoute(
   const targetDeg = (Math.atan2(dx, dy) * 180) / Math.PI; // atan2(восток, север)
   // Угол к цели относительно курса, приведённый к (-180, 180].
   const rel = signedDeltaDeg(targetDeg - anchor.headingDeg);
-  let turnText: string;
-  const a = Math.abs(rel);
-  if (a < 15) turnText = 'Идите прямо';
-  else if (a > 165) turnText = 'Развернитесь назад';
-  else if (rel > 0) turnText = a > 60 ? 'Поверните направо' : 'Возьмите правее';
-  else turnText = a > 60 ? 'Поверните налево' : 'Возьмите левее';
-  return { distanceM, relativeDeg: rel, turnText };
+  return { distanceM, relativeDeg: rel, turnText: turnTextForRelative(rel) };
 }
 
 // ── Выбор целевой ячейки ──────────────────────────────────────────────────────────
