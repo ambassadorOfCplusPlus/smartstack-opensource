@@ -1,8 +1,8 @@
 // MessengerChatService — изолированная переписка мессенджера (вариант 2).
 // Работает поверх отдельных таблиц messenger_conversations/participants/messages,
 // никак не пересекается с chat_*/users. Звонящий — мессенджер-юзер (по токену
-// kind='messenger'). Реал-тайм клиента — опрос (как в основном чате), сокетов нет
-// → серверу дёшево.
+// kind='messenger'). Реал-тайм — SSE (events.ts/routes.ts шлют участникам «пинг»
+// { type, conversationId } без контента), поллинг оставлен резервом.
 
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
@@ -86,6 +86,17 @@ export class MessengerChatService {
       name: this.displayName(u),
       publicKey: u.publicKey, // для E2E-шифрования сообщений этому контакту
     }));
+  }
+
+  // Все userId участников диалога — для реал-тайм рассылки (SSE) «пинга» о новом
+  // событии. Это серверное знание о составе диалога (как и для раздачи сообщений),
+  // нового раскрытия приватности нет; контент/автор в пинге НЕ передаются.
+  async participantUserIds(conversationId: string): Promise<string[]> {
+    const parts = await this.prisma.messengerParticipant.findMany({
+      where: { conversationId },
+      select: { messengerUserId: true },
+    });
+    return parts.map((p) => p.messengerUserId);
   }
 
   private async assertParticipant(caller: MessengerCaller, conversationId: string) {

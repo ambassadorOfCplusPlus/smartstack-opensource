@@ -10,6 +10,7 @@ class QLineEdit;
 class QLabel;
 class QTimer;
 class QUrl;
+class QNetworkReply;
 
 // Главное окно мессенджера: диалоги слева, переписка справа. E2E: шифруем тела
 // и файлы публичным ключом собеседника (общий ключ диалога), приватный — локально.
@@ -48,6 +49,8 @@ private:
     QString keyFingerprint(const QString& pubB64) const;
     void showSafety();
     void ensurePostToken(const QString& convId);  // получить секрет постинга диалога
+    void connectSse();             // реал-тайм: тикет → поток событий (SSE)
+    void scheduleSseReconnect();   // переподключение со свежим тикетом (бэкофф)
 
     ApiClient* m_api;
     QString m_selfId, m_selfName;
@@ -66,4 +69,6 @@ private:
     QLineEdit*    m_input = nullptr;
     QLabel*       m_title = nullptr;
     QTimer*       m_poll = nullptr;
+    QNetworkReply* m_sse = nullptr;   // активный поток SSE (null когда нет)
+    int           m_sseBackoffMs = 2000;
 };

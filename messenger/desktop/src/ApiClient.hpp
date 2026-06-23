@@ -8,6 +8,7 @@
 #include <functional>
 
 class QNetworkAccessManager;
+class QNetworkReply;
 
 class ApiClient : public QObject {
     Q_OBJECT
@@ -37,6 +38,16 @@ public:
                           const QString& postToken, JsonCb cb);
     void downloadBinSealed(const QString& path, const QString& attKey,
                            const QString& postToken, BinCb cb);
+
+    // SSE: открыть поток реал-тайм событий по одноразовому тикету (GET, без
+    // Authorization — тикет в query, токен не светим). onEvent(type,data) на каждое
+    // событие { type, conversationId }; onClosed() при обрыве (вызывающий
+    // переподключается со СВЕЖИМ тикетом). Возвращает QNetworkReply* — храните и
+    // abort() при выходе/переподключении (после abort придёт onClosed).
+    QNetworkReply* openEventStream(
+        const QString& ticket,
+        std::function<void(const QString& type, const QJsonObject& data)> onEvent,
+        std::function<void()> onClosed);
 
 private:
     QNetworkAccessManager* m_nam;

@@ -29,6 +29,9 @@
 #include <QVariant>
 #include <QDateTime>
 #include <QCryptographicHash>
+#include <QNetworkReply>
+#include <QPointer>
+#include <algorithm>
 
 static QString esc(const QString& s) {
     QString r = s;
@@ -46,12 +49,47 @@ MainWindow::MainWindow(ApiClient* api, const QString& selfId, const QString& sel
     buildUi();
     setupKeys();
     loadConversations();
+    connectSse(); // реал-тайм: мгновенная доставка по SSE
     m_poll = new QTimer(this);
     connect(m_poll, &QTimer::timeout, this, [this]() {
         loadConversations();
         if (!m_activeConv.isEmpty()) loadMessages(m_activeConv, false);
     });
-    m_poll->start(6000);
+    // Поллинг — РЕЗЕРВ (если SSE недоступен/оборвался или пинг потерян); реже, чем
+    // раньше, основную нагрузку несёт SSE.
+    m_poll->start(20000);
+}
+
+// Реал-тайм по SSE. 1) по токену получаем одноразовый тикет (токен не светим в URL);
+// 2) открываем поток. Пинг { type, conversationId } без контента → подтягиваем
+// sealed-сообщения. QPointer-страж защищает от UAF, если окно закрылось.
+void MainWindow::connectSse() {
+    m_api->post("/chat/events/ticket", QJsonObject{}, [this](bool ok, const QJsonValue& v, int) {
+        if (!ok) { scheduleSseReconnect(); return; }
+        const QString ticket = v.toObject().value("ticket").toString();
+        if (ticket.isEmpty()) { scheduleSseReconnect(); return; }
+        QPointer<MainWindow> guard(this);
+        m_sse = m_api->openEventStream(
+            ticket,
+            [guard](const QString&, const QJsonObject& d) {
+                if (!guard) return;
+                guard->m_sseBackoffMs = 2000; // поток жив — сбросить бэкофф
+                guard->loadConversations();
+                if (d.value("conversationId").toString() == guard->m_activeConv)
+                    guard->loadMessages(guard->m_activeConv, false);
+            },
+            [guard]() {
+                if (!guard) return;
+                guard->m_sse = nullptr;
+                guard->scheduleSseReconnect(); // переподключение со свежим тикетом
+            });
+    });
+}
+
+void MainWindow::scheduleSseReconnect() {
+    QPointer<MainWindow> guard(this);
+    QTimer::singleShot(m_sseBackoffMs, this, [guard]() { if (guard) guard->connectSse(); });
+    m_sseBackoffMs = std::min(m_sseBackoffMs * 2, 30000);
 }
 
 void MainWindow::buildUi() {

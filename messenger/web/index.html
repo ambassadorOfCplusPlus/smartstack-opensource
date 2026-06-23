@@ -175,6 +175,8 @@ let apiBase = LS.getItem('msg_api') || (location.origin);
 let convs = [];
 let activeId = null;
 let pollTimer = null;
+let es = null;            // EventSource (реал-тайм SSE)
+let sseBackoff = 2000;    // бэкофф переподключения SSE
 
 // ── E2E (tweetnacl) ──────────────────────────────────────────────────────────
 let myKeys = null;            // { publicKey: Uint8Array, secretKey: Uint8Array }
@@ -488,6 +490,7 @@ function logout() {
   token = ''; me = null; activeId = null;
   LS.removeItem('msg_token'); LS.removeItem('msg_me');
   if (pollTimer) clearInterval(pollTimer);
+  if (es) { es.close(); es = null; } // оборвать SSE (reconnect не сработает: token пуст)
   document.getElementById('app').classList.add('hidden');
   document.getElementById('auth').classList.remove('hidden');
 }
@@ -502,8 +505,43 @@ function enterApp() {
   call('/chat/keys', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ publicKey: pub }) }).catch(() => {});
   loadConvs();
+  connectSse(); // реал-тайм: мгновенная доставка по SSE
+  // Поллинг остаётся РЕЗЕРВОМ (если SSE недоступен/оборвался или пинг потерян) —
+  // реже, чем раньше, т.к. основную нагрузку несёт SSE.
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(() => { loadConvs(); if (activeId) loadMsgs(activeId, false); }, 6000);
+  pollTimer = setInterval(() => { loadConvs(); if (activeId) loadMsgs(activeId, false); }, 20000);
+}
+
+// Реал-тайм по SSE. Токен НЕ кладём в URL (он бы осел в логах): берём одноразовый
+// тикет по своему токену, затем открываем EventSource ?ticket=… . Событие — лишь
+// «пинг» { type, conversationId } без контента; по нему подтягиваем sealed-сообщения.
+async function connectSse() {
+  if (!token) return;
+  if (es) { es.close(); es = null; }
+  try {
+    const { ticket } = await call('/chat/events/ticket', { method: 'POST' });
+    es = new EventSource(api('/chat/events?ticket=' + encodeURIComponent(ticket)));
+    es.onopen = () => { sseBackoff = 2000; };
+    const onEvt = (e) => {
+      let d = null; try { d = JSON.parse(e.data); } catch { return; }
+      loadConvs(); // обновить список (превью/непрочитанное)
+      if (d && d.conversationId === activeId) loadMsgs(activeId, false); // открытый диалог
+    };
+    es.addEventListener('message', onEvt); // новое сообщение/файл
+    es.addEventListener('react', onEvt);   // реакция-смайлик
+    es.onerror = () => {
+      // Тикет одноразовый → авто-reconnect EventSource бесполезен. Закрываем и
+      // переподключаемся со СВЕЖИМ тикетом, с экспоненциальным бэкоффом.
+      if (es) { es.close(); es = null; }
+      if (!token) return;
+      setTimeout(connectSse, sseBackoff);
+      sseBackoff = Math.min(sseBackoff * 2, 30000);
+    };
+  } catch {
+    if (!token) return;
+    setTimeout(connectSse, sseBackoff);
+    sseBackoff = Math.min(sseBackoff * 2, 30000);
+  }
 }
 async function loadConvs() {
   try {

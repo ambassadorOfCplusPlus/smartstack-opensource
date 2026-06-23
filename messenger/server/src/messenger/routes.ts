@@ -21,6 +21,7 @@ import { resolveFileStorage } from '../lib/file-storage';
 const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024; // 25 МБ
 import { MessengerService, MessengerError } from './service';
 import { MessengerChatService, MessengerChatError } from './chat.service';
+import { EventHub, TicketStore } from './events';
 import { ChatError } from '../lib/attachments'; // бросается assertAllowedAttachment
 import { tunnelStatus } from './tunnel';
 import {
@@ -178,6 +179,19 @@ export async function registerMessengerRoutes(
     minioSecretKey: process.env.MINIO_SECRET_KEY,
   });
   const chat = new MessengerChatService(opts.prisma, storage);
+  // Реал-тайм: шина событий (в памяти процесса) + одноразовые SSE-тикеты.
+  const hub = new EventHub();
+  const tickets = new TicketStore();
+  // Разослать «пинг» участникам диалога (без контента/автора — приватность цела).
+  // Ошибки рассылки не должны влиять на ответ отправителю — глушим.
+  const notifyConversation = async (conversationId: string, type: 'message' | 'react') => {
+    try {
+      const ids = await chat.participantUserIds(conversationId);
+      hub.publish(ids, { type, conversationId, at: Date.now() });
+    } catch {
+      /* рассылка best-effort */
+    }
+  };
 
   // Multipart для вложений (идемпотентно).
   if (!app.hasContentTypeParser('multipart/form-data')) {
@@ -202,6 +216,55 @@ export async function registerMessengerRoutes(
   }
   const caller = (request: FastifyRequest) => ({ userId: request.user.sub, orgId: request.user.orgId });
   const mGuard = { preHandler: messengerAuth };
+
+  // ── Реал-тайм (SSE) ──────────────────────────────────────────────────────────
+  // 1) По токену мессенджера получить одноразовый тикет (токен НЕ светим в URL SSE).
+  app.post('/api/v1/messenger/chat/events/ticket', mGuard, async (request: FastifyRequest, reply) => {
+    return reply.send({ ticket: tickets.create(request.user.sub), ttlMs: 30_000 });
+  });
+
+  // 2) Поток событий: GET с ?ticket=… (EventSource умеет только GET, без заголовков).
+  //    Сервер шлёт «пинги» { type, conversationId } — без контента и без автора;
+  //    клиент по пингу подтягивает sealed-сообщения (sealed-sender/E2E не нарушены).
+  app.get('/api/v1/messenger/chat/events', (request: FastifyRequest, reply: FastifyReply) => {
+    const ticket = (request.query as { ticket?: string }).ticket ?? '';
+    const userId = tickets.consume(ticket);
+    if (!userId) {
+      void reply.status(401).send({ error: 'Unauthorized', message: 'Неверный или просроченный тикет' });
+      return;
+    }
+    reply.hijack(); // дальше пишем в сырой поток сами (Fastify не формирует ответ)
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no', // не буферизовать за nginx/прокси
+    });
+    raw.write('retry: 3000\n\n');   // бэкофф переподключения клиента
+    raw.write(': connected\n\n');
+    const unsubscribe = hub.subscribe(userId, (ev) => {
+      try {
+        raw.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+      } catch {
+        /* соединение закрылось между проверкой и записью */
+      }
+    });
+    // Keep-alive комментарий: держит соединение и сбрасывает прокси-таймауты.
+    const keepAlive = setInterval(() => {
+      try {
+        raw.write(': ping\n\n');
+      } catch {
+        /* закрыто */
+      }
+    }, 25_000);
+    const close = () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+    };
+    request.raw.on('close', close);
+    request.raw.on('error', close);
+  });
 
   // E2E: опубликовать свой публичный ключ (клиент генерирует пару при первом входе).
   app.put('/api/v1/messenger/chat/keys', mGuard, async (request: FastifyRequest, reply) => {
@@ -273,7 +336,9 @@ export async function registerMessengerRoutes(
     try {
       const { id } = convIdParamSchema.parse(request.params);
       const b = sendMessageSchema.parse(request.body);
-      return reply.status(201).send(await chat.sendMessage(caller(request), id, b.body ?? '', b.attachmentUrl));
+      const r = await chat.sendMessage(caller(request), id, b.body ?? '', b.attachmentUrl);
+      await notifyConversation(id, 'message'); // реал-тайм пинг участникам
+      return reply.status(201).send(r);
     } catch (err) {
       return handleError(reply, err);
     }
@@ -305,9 +370,9 @@ export async function registerMessengerRoutes(
     try {
       const { id } = convIdParamSchema.parse(request.params);
       const b = sealedSendSchema.parse(request.body);
-      return reply
-        .status(201)
-        .send(await chat.sealedSend(id, b.postToken, b.body ?? '', b.attachmentUrl, b.type ?? 'msg'));
+      const r = await chat.sealedSend(id, b.postToken, b.body ?? '', b.attachmentUrl, b.type ?? 'msg');
+      await notifyConversation(id, (b.type ?? 'msg') === 'react' ? 'react' : 'message');
+      return reply.status(201).send(r);
     } catch (err) {
       return handleError(reply, err);
     }

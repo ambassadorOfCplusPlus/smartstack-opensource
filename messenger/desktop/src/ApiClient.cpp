@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QUrl>
+#include <memory>
 
 ApiClient::ApiClient(QObject* parent) : QObject(parent), m_nam(new QNetworkAccessManager(this)) {}
 
@@ -135,6 +136,46 @@ void ApiClient::downloadBinSealed(const QString& path, const QString& attKey,
         reply->deleteLater();
         if (cb) cb(status >= 200 && status < 300, data, filename);
     });
+}
+
+QNetworkReply* ApiClient::openEventStream(
+    const QString& ticket,
+    std::function<void(const QString&, const QJsonObject&)> onEvent,
+    std::function<void()> onClosed) {
+    QNetworkRequest req{ QUrl(url("/chat/events?ticket=" +
+                                 QString::fromUtf8(QUrl::toPercentEncoding(ticket)))) };
+    req.setRawHeader("Accept", "text/event-stream");
+    // Долгий поток: не даём Qt буферизовать/закрывать преждевременно.
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+
+    QNetworkReply* reply = m_nam->get(req);
+    auto buf = std::make_shared<QByteArray>();
+    // Инкрементальный разбор SSE: события разделены пустой строкой ("\n\n");
+    // строки "event:"/"data:" значимы, ":"-строки — keep-alive комментарии.
+    QObject::connect(reply, &QNetworkReply::readyRead, this, [reply, buf, onEvent]() {
+        buf->append(reply->readAll());
+        int sep;
+        while ((sep = buf->indexOf("\n\n")) >= 0) {
+            const QByteArray block = buf->left(sep);
+            buf->remove(0, sep + 2);
+            QString type = QStringLiteral("message");
+            QByteArray data;
+            for (const QByteArray& line : block.split('\n')) {
+                if (line.isEmpty() || line.startsWith(':')) continue; // комментарий/keep-alive
+                if (line.startsWith("event:")) type = QString::fromUtf8(line.mid(6)).trimmed();
+                else if (line.startsWith("data:")) data = line.mid(5).trimmed();
+            }
+            if (data.isEmpty()) continue;
+            const QJsonObject obj = QJsonDocument::fromJson(data).object();
+            if (onEvent) onEvent(type, obj);
+        }
+    });
+    // finished приходит и при обрыве, и при abort() → один обработчик закрытия.
+    QObject::connect(reply, &QNetworkReply::finished, this, [reply, onClosed]() {
+        reply->deleteLater();
+        if (onClosed) onClosed();
+    });
+    return reply;
 }
 
 void ApiClient::downloadBin(const QString& path, BinCb cb) {
