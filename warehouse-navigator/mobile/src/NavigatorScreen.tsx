@@ -32,6 +32,9 @@ import {
   tiltCompensatedHeadingDeg,
   magnetometerToHeadingDeg,
   createStepDetector,
+  createStillnessDetector,
+  createGyroBiasEstimator,
+  calibrateStrideScale,
   snapOutOfObstacles,
   MAGNETOMETER_INTERVAL_MS,
   ACCELEROMETER_INTERVAL_MS,
@@ -87,6 +90,16 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
 
   const headingRef = useRef<number>(0);
   const accelRef = useRef<{ x: number; y: number; z: number } | null>(null);
+  // Повышение точности PDR:
+  const stillRef = useRef(false);          // ZUPT: человек стоит (низкая дисперсия |a|)
+  const strideScaleRef = useRef(1);        // персональный масштаб длины шага (калибруется по якорям)
+  const pdrSinceAnchorRef = useRef(0);     // пройдено по PDR с последнего якоря (для калибровки)
+  const prevAnchorRef = useRef<NavAnchor | null>(null); // якорь, ОТ которого шли (пара для калибровки)
+  const opticsTouchedSinceAnchorRef = useRef(false);    // оптика правила позу на отрезке → шаг НЕ калибруем
+  // Детекторы покоя/дрейфа гиро ПЕРЕЖИВАЮТ рескан якоря (живут в ref): иначе при каждом
+  // скане выученное смещение нуля гироскопа терялось бы и курс снова уползал.
+  const stillnessRef = useRef<ReturnType<typeof createStillnessDetector> | null>(null);
+  const gyroBiasRef = useRef<ReturnType<typeof createGyroBiasEstimator> | null>(null);
   // План склада в ДВУХ местах: ref читает обработчик шага без ре-рендера, state
   // перерисовывает карту, когда план догрузился (мутация ref сама рендер не вызывает).
   const rectsRef = useRef<LayoutRect[]>([]);
@@ -210,6 +223,9 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
         },
         fused.snapped, // жёсткий снап — рисуем немедленно
       );
+      // Оптика вмешалась в позу на этом отрезке → пройденный PDR-путь больше не
+      // отражает чистое счисление, и калибровать по нему длину шага нельзя.
+      opticsTouchedSinceAnchorRef.current = true;
       if (fused.snapped) {
         setNote(`оптика выправила дрейф ${fused.driftM.toFixed(1)} м`);
         setPdrMeters(0); // дрейф сброшен — счётчик «пройдено по датчикам» обнуляем
@@ -235,6 +251,8 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
     let magBaseline = 0;
     let magRejectStreak = 0;
     const stepDetector = createStepDetector();
+    const stillness = (stillnessRef.current ??= createStillnessDetector()); // ZUPT-триггер; переживает рескан
+    const gyroBias = (gyroBiasRef.current ??= createGyroBiasEstimator());    // дрейф нуля гиро; переживает рескан
     const stepLenQueue: number[] = [];
     let lastStepLen = STEP_LENGTH_M;
 
@@ -242,7 +260,9 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
     const accelSub = Accelerometer.addListener((a) => {
       if (!Number.isFinite(a.x) || !Number.isFinite(a.y) || !Number.isFinite(a.z)) return;
       accelRef.current = a;
-      const len = stepDetector.update(magnitude3(a.x, a.y, a.z), Date.now());
+      const mag = magnitude3(a.x, a.y, a.z);
+      stillRef.current = stillness.update(mag, Date.now()); // обновляем флаг покоя для ZUPT
+      const len = stepDetector.update(mag, Date.now());
       if (len !== null) {
         stepLenQueue.push(len);
         if (stepLenQueue.length > 32) stepLenQueue.shift();
@@ -276,9 +296,12 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
       gyroLastTs = now;
       if (dt <= 0 || dt > GYRO_MAX_DT_SEC) return;
       if (!Number.isFinite(z)) return;
+      // ZUPT: пока стоим — учим смещение нуля гироскопа и вычитаем его. Курс
+      // перестаёт «уползать» при стоянии и заметно меньше дрейфит при ходьбе.
+      const correctedRate = gyroBias.update(-z, stillRef.current);
       headingRef.current = fuseHeadingComplementary(
         headingRef.current,
-        -z,
+        correctedRate,
         dt,
         magHeading,
         magValid ? HEADING_FUSE_ALPHA : 0,
@@ -306,8 +329,9 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
           for (let i = 0; i < newSteps; i++) {
             const next = stepLenQueue.shift();
             if (next !== undefined) lastStepLen = next;
-            dist += lastStepLen;
+            dist += lastStepLen * strideScaleRef.current; // персональный масштаб шага (калибр. по якорям)
           }
+          pdrSinceAnchorRef.current += dist; // копим путь от последнего якоря для калибровки
           const heading = headingRef.current;
           const { dx, dy } = stepDelta(heading, dist);
           // Читаем АВТОРИТЕТНУЮ позу из ref (её мог только что поправить кадр оптики) —
@@ -346,6 +370,28 @@ export function NavigatorScreen({ source, onExit }: Props): React.ReactElement {
     const parsed = parseAnchor(data);
     if (!parsed) return; // не наш QR — игнор
     scanLockRef.current = true;
+    // Калибровка длины шага по паре якорей — ТОЛЬКО на чистом, прямом PDR-отрезке:
+    //  • оптика на отрезке не вмешивалась (иначе путь не отражает счисление);
+    //  • шли примерно ПО ПРЯМОЙ (путь ≈ смещению по прямой) — иначе кривой путь
+    //    систематически «укорачивал» бы шаг (любой реальный путь ≥ прямой).
+    const prev = prevAnchorRef.current;
+    const cur = livePosRef.current; // поза PDR прямо перед сбросом на новый якорь
+    if (
+      prev !== null &&
+      prev.warehouseId === parsed.warehouseId &&
+      !opticsTouchedSinceAnchorRef.current &&
+      cur !== null
+    ) {
+      const trueDist = Math.hypot(parsed.xM - prev.xM, parsed.yM - prev.yM);
+      const pdrPath = pdrSinceAnchorRef.current;
+      const netDisp = Math.hypot(cur.xM - prev.xM, cur.yM - prev.yM);
+      if (netDisp > 0 && pdrPath <= netDisp * 1.15) {
+        strideScaleRef.current = calibrateStrideScale(trueDist, pdrPath, strideScaleRef.current);
+      }
+    }
+    prevAnchorRef.current = parsed;
+    pdrSinceAnchorRef.current = 0;
+    opticsTouchedSinceAnchorRef.current = false; // новый отрезок начинается «чистым»
     headingRef.current = parsed.headingDeg;
     arRefRef.current = null; // AR заново зафиксирует референс по новому якорю
     livePosRef.current = parsed; // авторитетная поза сразу (PDR/оптика стартуют отсюда)

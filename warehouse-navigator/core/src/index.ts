@@ -11,6 +11,7 @@ export * from './math/navigatorMath.js'; // курс, PDR, Вайнберг, д�
 export * from './math/navigatorMapMatch.js'; // map-matching по плану склада
 export * from './math/navigatorGuidance.js'; // выправление стрелки по плану (обход стен/стеллажей)
 export * from './math/navigatorFusion.js'; // оптическо-инерциальная фузия (оптика выправляет дрейф PDR)
+export * from './math/navigatorAccuracy.js'; // ZUPT гиро-bias, детектор покоя, калибровка шага по якорям
 // navigatorAr реэкспортит normalizeDeg из navigatorMath — берём из него остальное
 // явно, чтобы не задвоить normalizeDeg в бочке-реэкспорте.
 export {
