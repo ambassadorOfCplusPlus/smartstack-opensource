@@ -1,0 +1,11 @@
+# Build
+build/
+out/
+cmake-build-*/
+*.obj
+*.exe
+*.lib
+*.pdb
+
+# FetchContent / deps
+_deps/

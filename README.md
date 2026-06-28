@@ -18,8 +18,12 @@
 | [**marketplace-adapters/**](marketplace-adapters/) | **Адаптеры маркетплейсов** (FBS): Wildberries / Ozon / Yandex.Market / Sber — выгрузка остатков и цен, импорт заказов. HTTP-клиент инъектируется, ключи продавца не хранятся в библиотеке. | TypeScript (zero runtime deps) | ✅ 23/23 тестов |
 | [**warehouse-navigator/**](warehouse-navigator/) | **Навигация по складу** «доведи до товара» без GPS: QR-якоря + AR/PDR (компас-гиро фьюжн, шаг по Вайнбергу, отсев магнитных аномалий, map-matching по плану, **выправление стрелки по 3D-плану**, **оптическо-инерциальная фузия** — оптика выправляет дрейф PDR, **ZUPT гиро-bias + калибровка шага по якорям**). Мобильный **APK** + **ПК-клиент** (Qt) + LAN-сервер; только склад/ячейки/товар/навигатор. | TS-ядро (zero-deps) · Node LAN-сервер · Expo RN · Qt6/C++ | ✅ ядро 127/127 · сервер 12/12 · mobile typecheck · Qt собирается |
 | [**sync-engine/**](sync-engine/) | **Offline-first синхронизация** (референс-дизайн + ядро): журнал событий, идемпотентность по UUID, vector clocks, gap-free pull (xmin-горизонт), 2 типа конфликтов (физический → недостача, смысловой → голосование). | TypeScript (ядро) + [DESIGN.md](sync-engine/docs/DESIGN.md) + оригинал в `reference/` | ✅ 40/40 тестов |
+| [**ai-toolcalling/**](ai-toolcalling/) | **Локальный LLM с tool-calling для C++**: приноси свою модель (`IGenerator`) и свои инструменты (`ToolRegistry`) — ядро даёт терпимый парсер форматов вызова мелких моделей, детерминированный агент-цикл (модель предлагает → исполняешь ты), снятие `<think>`, сборку промпта. Header-only, model-agnostic. + [исследование 13 локальных моделей](ai-toolcalling/docs/RESEARCH.md). | C++17 header-only · nlohmann/json | ✅ 18/18 тестов |
 
 ## Почему это интересно
+- **План-протокол против конфабуляции** — слабые локальные LLM не «вызывают функции
+  сами» (выдумывают), а отдают JSON-план, который исполняет детерминированный код
+  против авторитетного реестра. См. [`ai-toolcalling/docs/DESIGN.md`](ai-toolcalling/docs/DESIGN.md).
 - **E2E-крипта, совместимая между платформами** — один формат `crypto_box`/`secretbox`
   работает и в вебе (tweetnacl), и в нативном Qt (libsodium); групповой
   «пер-получательский конверт», гибрид для файлов. См. [`messenger/docs/CRYPTO.md`](messenger/docs/CRYPTO.md).
