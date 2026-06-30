@@ -14,10 +14,12 @@
 // Здесь это простой строковый союз — никакой зависимости от Prisma/БД.
 export type WriteoffReason =
   | 'sale'
+  | 'return'
   | 'writeoff'
   | 'expiry'
   | 'damage'
   | 'inventory'
+  | 'inventory_correction'
   | 'transfer';
 
 // Метод списания партий (как enum WriteoffMethod в WriteoffEngine.hpp).

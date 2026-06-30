@@ -101,8 +101,11 @@ export async function computePlan(
       const row = rows[i]!;
       const avail = available(row);
       if (avail <= EPS) continue;
-      const share =
+      let share =
         i === lastIdx ? quantity - allocated : (quantity * avail) / totalAvail;
+      // Не списываем из партии больше, чем в ней есть (иначе остаток партии ушёл
+      // бы в минус из-за добора округления в последнюю строку).
+      share = Math.min(share, avail);
       if (share <= EPS) continue;
       allocated += share;
       const cost = round2(avg);

@@ -293,6 +293,32 @@ describe('WriteoffEngine WeightedAverage', () => {
     const total = res.items.reduce((acc, x) => acc + x.quantity, 0);
     expect(total).toBeCloseTo(10, 6);
   });
+
+  it('ни одна партия не уходит в минус (кламп доли share ≤ остаток)', async () => {
+    // Неравные партии + добор округления в последнюю значимую: без клампа
+    // share≤avail остаток последней партии мог бы уйти в минус.
+    const state = makeState({
+      products: [{ id: 'P1', quantity: 7 }],
+      batches: [
+        batch('B1', { quantity: 3, costPrice: 100, receivedAt: 1000 }),
+        batch('B2', { quantity: 3, costPrice: 150, receivedAt: 2000 }),
+        batch('B3', { quantity: 1, costPrice: 200, receivedAt: 3000 }),
+      ],
+    });
+    const res = await withTransaction(state, (s) =>
+      applyWriteoff(s, {
+        productId: 'P1',
+        warehouseId: 'W1',
+        quantity: 7,
+        method: 'WeightedAverage',
+        reason: 'sale',
+        userId: 'U1',
+      }),
+    );
+    expect(res.success).toBe(true);
+    // Остаток каждой партии неотрицателен (инвариант, который защищает кламп).
+    for (const b of state.batches) expect(b.quantity).toBeGreaterThanOrEqual(0);
+  });
 });
 
 describe('WriteoffEngine справочные расчёты', () => {
