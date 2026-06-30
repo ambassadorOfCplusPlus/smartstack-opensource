@@ -22,6 +22,18 @@ export type { SberAdapterOptions } from './sber.adapter';
 export { fetchWithRetry, safeText, errMsg } from './http';
 export type { RetryOptions } from './http';
 
+// Импорт финансов маркетплейса — чистые парсеры/построители финотчёта WB/Ozon.
+export {
+  parseWbFinanceReport,
+  parseOzonFinanceTxns,
+  parseWbFinanceTable,
+  parseOzonFinanceTable,
+  buildOzonFinanceRequest,
+  parseDateToEpochUtc,
+  daysFromCivil,
+} from './finance';
+export type { FinanceLine, FinanceCategory } from './finance';
+
 export type {
   MarketplacePlatform,
   MarketplaceAdapter,

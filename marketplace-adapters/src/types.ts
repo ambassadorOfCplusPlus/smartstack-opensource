@@ -2,6 +2,8 @@
 // СберМегаМаркет) реализует MarketplaceAdapter поверх своего HTTP API. Сетевой fetch
 // инжектируется, чтобы тесты не ходили в реальную сеть (фейк-fetch).
 
+import type { FinanceLine } from './finance';
+
 // Идентификатор площадки. Один источник правды для типов адаптера/аккаунта;
 // синхронен с Zod platformSchema и Prisma-enum MarketplacePlatform.
 export type MarketplacePlatform = 'wb' | 'ozon' | 'yandex' | 'sber';
@@ -80,6 +82,9 @@ export interface MarketplaceAdapter {
   pushPrices?(items: PriceItem[]): Promise<PushResult>;
   // Обновить статус заказа на МП (опционально).
   updateOrderStatus?(externalOrderId: string, status: string): Promise<void>;
+  // Импорт финансовых операций за период [dateFrom..dateTo] ("YYYY-MM-DD")
+  // (опционально — у части площадок отдельный финотчёт). Бросает при ошибке.
+  fetchFinanceLines?(dateFrom: string, dateTo: string): Promise<FinanceLine[]>;
 }
 
 // Параметры конструирования адаптера из аккаунта.
@@ -90,4 +95,7 @@ export interface AdapterAccount {
   clientId?: string | null;
   // Идентификатор склада на стороне МП (WB warehouseId; Ozon/Яндекс warehouse_id).
   externalWarehouseId?: string | null;
+  // WB: токен категории «Статистика» для финотчёта (если пуст — используется apiKey).
+  // Для Ozon/Яндекс не нужен.
+  statsApiKey?: string | null;
 }

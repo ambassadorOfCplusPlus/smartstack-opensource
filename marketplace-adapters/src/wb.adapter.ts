@@ -19,6 +19,7 @@
 // (ретрай на 429/5xx). fetch инжектируется; тесты подставляют фейк.
 
 import { fetchWithRetry, safeText, errMsg, type RetryOptions } from './http';
+import { parseWbFinanceReport, jllInt, type FinanceLine } from './finance';
 import type {
   AdapterAccount,
   FetchLike,
@@ -35,9 +36,14 @@ const WB_BASE = 'https://marketplace-api.wildberries.ru';
 const WB_PRICE_BASE = 'https://discounts-prices-api.wildberries.ru';
 // База Content API WB (карточки товара) — для резолва nmID по штрихкоду.
 const WB_CONTENT_BASE = 'https://content-api.wildberries.ru';
+// База Statistics API WB (финотчёт reportDetailByPeriod).
+const WB_STATS_BASE = 'https://statistics-api.wildberries.ru';
 // Размер страницы и верхний предел страниц при выгрузке карточек (защита от цикла).
 const CARDS_PAGE_LIMIT = 100;
 const CARDS_MAX_PAGES = 100; // до 10000 карточек
+// Финотчёт: размер страницы курсора rrdid и потолок страниц (защита от цикла).
+const FIN_PAGE_LIMIT = 100000;
+const FIN_MAX_PAGES = 200;
 
 export interface WbAdapterOptions {
   fetchImpl: FetchLike;
@@ -46,6 +52,8 @@ export interface WbAdapterOptions {
   priceBaseUrl?: string;
   // База Content API (карточки) — переопределяется в тестах.
   contentBaseUrl?: string;
+  // База Statistics API (финотчёт) — переопределяется в тестах.
+  statsBaseUrl?: string;
   // Опции ретрая сетевых вызовов (в тестах — нулевая задержка).
   retry?: RetryOptions;
 }
@@ -56,6 +64,7 @@ export class WbAdapter implements MarketplaceAdapter {
   private readonly baseUrl: string;
   private readonly priceBaseUrl: string;
   private readonly contentBaseUrl: string;
+  private readonly statsBaseUrl: string;
   private readonly retry?: RetryOptions;
 
   constructor(
@@ -66,6 +75,7 @@ export class WbAdapter implements MarketplaceAdapter {
     this.baseUrl = opts.baseUrl ?? WB_BASE;
     this.priceBaseUrl = opts.priceBaseUrl ?? WB_PRICE_BASE;
     this.contentBaseUrl = opts.contentBaseUrl ?? WB_CONTENT_BASE;
+    this.statsBaseUrl = opts.statsBaseUrl ?? WB_STATS_BASE;
     this.retry = opts.retry;
   }
 
@@ -247,6 +257,63 @@ export class WbAdapter implements MarketplaceAdapter {
         raw: o,
       };
     }).filter((o) => o.externalOrderId !== '');
+  }
+
+  // GET /api/v5/supplier/reportDetailByPeriod — финотчёт о реализации за период.
+  // Пагинация по курсору rrdid (макс. rrd_id предыдущей страницы). Токен —
+  // категории «Статистика» (statsApiKey; если пуст — общий apiKey). Бросает при
+  // сетевой/HTTP-ошибке (вызывающий в UI прогоняет через ErrorMapper).
+  //
+  // ⚠ МИГРАЦИЯ WB (дедлайн 15.07.2026): reportDetailByPeriod отключается, замена —
+  // POST /api/finance/v1/sales-reports/detailed (другие имена полей). До миграции и
+  // при сбое API фолбэк — импорт из файла кабинета (parseWbFinanceTable).
+  async fetchFinanceLines(dateFrom: string, dateTo: string): Promise<FinanceLine[]> {
+    const token = this.account.statsApiKey || this.account.apiKey;
+    const all: FinanceLine[] = [];
+    let rrdid = 0;
+    for (let page = 0; page < FIN_MAX_PAGES; page += 1) {
+      const url =
+        `${this.statsBaseUrl}/api/v5/supplier/reportDetailByPeriod` +
+        `?dateFrom=${encodeURIComponent(dateFrom)}&dateTo=${encodeURIComponent(dateTo)}` +
+        `&limit=${FIN_PAGE_LIMIT}&rrdid=${rrdid}`;
+      let res;
+      try {
+        res = await fetchWithRetry(
+          this.fetchImpl,
+          url,
+          { method: 'GET', headers: { Authorization: token } },
+          this.retry,
+        );
+      } catch (err) {
+        throw new Error(`WB финансы: сетевая ошибка ${errMsg(err)}`);
+      }
+      if (!res.ok) {
+        const text = await safeText(res);
+        throw new Error(`WB финансы: HTTP ${res.status} ${text}`);
+      }
+      const j = (await res.json()) as unknown;
+      // Пустой ответ (null/[]) — данных больше нет.
+      if (j == null || (Array.isArray(j) && j.length === 0)) break;
+      const before = all.length;
+      for (const ln of parseWbFinanceReport(j)) all.push(ln);
+      // Сдвигаем курсор на максимальный rrd_id страницы.
+      let maxRrd = rrdid;
+      let rows: number;
+      if (Array.isArray(j)) {
+        rows = j.length;
+        for (const r of j) {
+          if (r && typeof r === 'object' && 'rrd_id' in r) {
+            maxRrd = Math.max(maxRrd, jllInt((r as Record<string, unknown>).rrd_id));
+          }
+        }
+      } else {
+        rows = all.length - before;
+      }
+      if (rows < FIN_PAGE_LIMIT) break; // последняя (неполная) страница
+      if (maxRrd <= rrdid) break; // курсор не двигается — стоп
+      rrdid = maxRrd;
+    }
+    return all;
   }
 }
 

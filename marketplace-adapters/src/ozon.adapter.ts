@@ -12,6 +12,11 @@
 // инжектируется (в проде — глобальный fetch Node), тесты подставляют фейк.
 
 import { fetchWithRetry, safeText, errMsg, type RetryOptions } from './http';
+import {
+  buildOzonFinanceRequest,
+  parseOzonFinanceTxns,
+  type FinanceLine,
+} from './finance';
 import type {
   AdapterAccount,
   FetchLike,
@@ -26,6 +31,9 @@ const OZON_BASE = 'https://api-seller.ozon.ru';
 // Размер страницы и верхний предел страниц при выборке необработанных заказов.
 const ORDERS_PAGE_LIMIT = 100;
 const ORDERS_MAX_PAGES = 20;
+// Финотчёт: размер страницы и потолок страниц (защита от бесконечной пагинации).
+const FIN_PAGE_SIZE = 1000;
+const FIN_MAX_PAGES = 200;
 
 export interface OzonAdapterOptions {
   fetchImpl: FetchLike;
@@ -214,6 +222,43 @@ export class OzonAdapter implements MarketplaceAdapter {
       return { ok: 0, errors: [`Ozon цены: сетевая ошибка ${errMsg(err)}`] };
     }
   }
+
+  // POST /v3/finance/transaction/list — финотчёт за период, постранично по page
+  // (result.page_count с первой страницы). Бросает при сетевой/HTTP-ошибке.
+  async fetchFinanceLines(dateFrom: string, dateTo: string): Promise<FinanceLine[]> {
+    const all: FinanceLine[] = [];
+    let pageCount = 1;
+    for (let page = 1; page <= pageCount && page <= FIN_MAX_PAGES; page += 1) {
+      const body = buildOzonFinanceRequest(dateFrom, dateTo, page, FIN_PAGE_SIZE);
+      let res;
+      try {
+        res = await fetchWithRetry(
+          this.fetchImpl,
+          `${this.baseUrl}/v3/finance/transaction/list`,
+          { method: 'POST', headers: this.headers(), body: JSON.stringify(body) },
+          this.retry,
+        );
+      } catch (err) {
+        throw new Error(`Ozon финансы: сетевая ошибка ${errMsg(err)}`);
+      }
+      if (!res.ok) {
+        const text = await safeText(res);
+        throw new Error(`Ozon финансы: HTTP ${res.status} ${text}`);
+      }
+      const j = (await res.json()) as unknown;
+      for (const ln of parseOzonFinanceTxns(j)) all.push(ln);
+      // page_count приходит с первой страницы — фиксируем число итераций.
+      if (page === 1 && isObj(j) && isObj(j.result) && 'page_count' in j.result) {
+        const pc = j.result.page_count;
+        pageCount = Math.max(1, Math.trunc(typeof pc === 'number' ? pc : Number(pc) || 1));
+      }
+    }
+    return all;
+  }
+}
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 interface OzonStockResult {
