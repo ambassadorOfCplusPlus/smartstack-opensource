@@ -165,6 +165,25 @@ cmake --build build
 
 Упаковка под Windows — см. `desktop/packaging/` (NSIS).
 
+## Разработка
+
+Подпроекты: `server/` (Node/Fastify/Prisma), `web/` (статичный клиент),
+`desktop/` (Qt). **Тесты и типчек серверной части гоняются в `server/`:**
+
+```bash
+cd server
+npm install
+npm run prisma:generate
+npx tsc --noEmit   # типчек (отдельного npm-скрипта нет; либо npm run build)
+npm test           # vitest run — 27 тестов
+npm run build      # tsc → dist/
+```
+
+Свежее: счётчик непрочитанного переведён на один `groupBy` (без N+1-запросов).
+Ревью: правки сверять с источником в основном проекте SmartStock; серверную
+логику (E2E-конверты, sealed-sender, счётчики) держать тестируемой без внешних
+сервисов.
+
 ## Эндпоинты API
 
 | Метод  | Путь                                                  | Доступ        | Назначение |

@@ -176,21 +176,32 @@ export class MessengerChatService {
     });
 
     const byId = new Map(memberships.map((m) => [m.conversationId, m]));
+    // Непрочитанные — ОДНИМ groupBy по всем диалогам сразу (без N+1-цикла count на
+    // каждый диалог). По OR-ветке на диалог: conversationId + его собственный
+    // lastReadAt-cutoff. При sealed-отправке senderId=null (автор не сохранён) —
+    // такие серверу не атрибутируются и в счётчик не входят; точный счёт ведёт
+    // клиент (localRead). Реакции не считаем (type='msg'). Пустой OR → 0 групп.
+    const unreadGroups = await this.prisma.messengerMessage.groupBy({
+      by: ['conversationId'],
+      where: {
+        type: 'msg',
+        senderId: { not: caller.userId },
+        OR: conversations.map((conv) => {
+          const lastReadAt = byId.get(conv.id)?.lastReadAt ?? null;
+          return {
+            conversationId: conv.id,
+            ...(lastReadAt ? { createdAt: { gt: lastReadAt } } : {}),
+          };
+        }),
+      },
+      _count: { _all: true },
+    });
+    const unreadById = new Map(
+      unreadGroups.map((g) => [g.conversationId, g._count._all]),
+    );
     const out = [];
     for (const conv of conversations) {
-      const mine = byId.get(conv.id);
-      const lastReadAt = mine?.lastReadAt ?? null;
-      // Серверный счётчик непрочитанного — best-effort: при sealed-отправке
-      // senderId=null (автор не сохранён), поэтому свои сообщения не вычесть —
-      // точный счёт ведёт клиент (localRead). Реакции не считаем.
-      const unread = await this.prisma.messengerMessage.count({
-        where: {
-          conversationId: conv.id,
-          type: 'msg',
-          senderId: { not: caller.userId },
-          ...(lastReadAt ? { createdAt: { gt: lastReadAt } } : {}),
-        },
-      });
+      const unread = unreadById.get(conv.id) ?? 0;
       const others = conv.participants
         .filter((p) => p.messengerUserId !== caller.userId)
         .map((p) => ({
