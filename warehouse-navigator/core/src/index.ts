@@ -5,6 +5,7 @@
 export * from './model.js';
 export * from './store.js';
 export * from './snapshot.js';
+export * from './navigatorRoute.js'; // маршрут по нескольким товарам (pick-list): обход + остаток пути
 
 // Математика навигатора.
 export * from './math/navigatorMath.js'; // курс, PDR, Вайнберг, детектор шагов, маршрут, парсинг якоря, normalizeDeg
