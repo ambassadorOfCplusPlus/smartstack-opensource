@@ -4,6 +4,8 @@
 распределённая ERP + мессенджер, ~140k строк). Каждый модуль автономен, со своей
 лицензией MIT, своим README и тестами — берите по отдельности.
 
+🌐 **Сайт проекта:** <https://ambassadorofcplusplus.github.io/smartstock-web/>
+
 > Short EN: reusable open-source pieces extracted from the SmartStock project —
 > a self-hosted E2E messenger, a batch (FIFO/LIFO/avg) write-off engine, an
 > executable-gluing tool, and marketplace adapters. Each is standalone, MIT.
@@ -18,7 +20,7 @@
 | [**marketplace-adapters/**](marketplace-adapters/) | **Адаптеры маркетплейсов** (FBS): Wildberries / Ozon / Yandex.Market / Sber — выгрузка остатков и цен, импорт заказов, **импорт финансов** (WB Statistics / Ozon transactions + парсеры файлов кабинета, `finance.ts`). HTTP-клиент инъектируется, ключи продавца не хранятся в библиотеке. | TypeScript (zero runtime deps) | ✅ 55/55 тестов |
 | [**warehouse-navigator/**](warehouse-navigator/) | **Навигация по складу** «доведи до товара» без GPS: QR-якоря + AR/PDR (компас-гиро фьюжн, шаг по Вайнбергу, отсев магнитных аномалий, map-matching по плану, **выправление стрелки по 3D-плану**, **оптическо-инерциальная фузия** — оптика выправляет дрейф PDR, **ZUPT гиро-bias + калибровка шага по якорям**, **маршрут по нескольким товарам — pick-list**). Мобильный **APK** + **ПК-клиент** (Qt) + LAN-сервер; только склад/ячейки/товар/навигатор. | TS-ядро (zero-deps) · Node LAN-сервер · Expo RN · Qt6/C++ | ✅ ядро 137/137 · сервер 12/12 · mobile typecheck · Qt собирается |
 | [**sync-engine/**](sync-engine/) | **Offline-first синхронизация** (референс-дизайн + ядро): журнал событий, идемпотентность по UUID, vector clocks, gap-free pull (xmin-горизонт), 2 типа конфликтов; **актуальный реле-стек** (E2E-кодек AES-256-GCM, транспорт реле, дедуп по op_id, оркестратор по ts-курсору) рядом с legacy serverSeq-моделью. | TypeScript (ядро) + [DESIGN.md](sync-engine/docs/DESIGN.md) + оригинал в `reference/` | ✅ 71/71 тестов |
-| [**ai-toolcalling/**](ai-toolcalling/) | **Локальный LLM с tool-calling для C++**: приноси свою модель (`IGenerator`) и свои инструменты (`ToolRegistry`) — ядро даёт терпимый парсер форматов вызова мелких моделей, детерминированный агент-цикл (модель предлагает → исполняешь ты), снятие `<think>`, сборку промпта. Header-only, model-agnostic. + [исследование 13 локальных моделей](ai-toolcalling/docs/RESEARCH.md). | C++17 header-only · nlohmann/json | ✅ 18/18 тестов |
+| [**ai-toolcalling/**](ai-toolcalling/) | **Локальный LLM с tool-calling для C++**: приноси свою модель (`IGenerator`) и свои инструменты (`ToolRegistry`) — ядро даёт терпимый парсер форматов вызова мелких моделей, детерминированный агент-цикл (модель предлагает → исполняешь ты), снятие `<think>`, сборку промпта, **нативные протоколы** (Hammer/Mistral/Llama/Hermes/LFM) и **устойчивый агент-цикл** (лимиты/кэш/отмена/`sanitizeAnswer`). Header-only, model-agnostic. + [исследование 13 локальных моделей](ai-toolcalling/docs/RESEARCH.md). | C++17 header-only · nlohmann/json | ✅ 45/45 тестов |
 
 ## Почему это интересно
 - **План-протокол против конфабуляции** — слабые локальные LLM не «вызывают функции
