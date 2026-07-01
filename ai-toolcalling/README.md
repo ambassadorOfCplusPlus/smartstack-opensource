@@ -57,7 +57,7 @@ Header-only — достаточно положить `include/` в include-пу
 ```bash
 cmake -S . -B build            # найдёт nlohmann/json и GTest (vcpkg/system) либо скачает
 cmake --build build
-ctest --test-dir build         # 18 тестов: парсер, реестр, агент-цикл (мок-модель)
+ctest --test-dir build         # 45 тестов: парсер, реестр, протоколы, агент-цикл (мок-модель)
 ./build/calc_demo              # сквозное демо без реальной LLM
 ```
 
@@ -70,7 +70,7 @@ ctest --test-dir build         # 18 тестов: парсер, реестр, а
 |---|---|
 | [`include/aitc/aitc.hpp`](include/aitc/aitc.hpp) | всё ядро (header-only): типы, реестр, парсер, агент-цикл |
 | [`examples/calc_demo.cpp`](examples/calc_demo.cpp) | сквозное демо со «скриптовой» моделью |
-| [`tests/test_aitc.cpp`](tests/test_aitc.cpp) | 18 тестов (парсер/реестр/агент) |
+| [`tests/test_aitc.cpp`](tests/test_aitc.cpp) | 45 тестов (парсер/реестр/протоколы/агент) |
 | [`docs/PLATFORM.md`](docs/PLATFORM.md) | как подключить свой инструмент и свою модель |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | архитектура: мозг/движок, протоколы, агент-цикл |
 | [`docs/RESEARCH.md`](docs/RESEARCH.md) | бенч 13 локальных моделей: что выбрать и почему |

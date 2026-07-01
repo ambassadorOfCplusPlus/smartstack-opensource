@@ -180,3 +180,183 @@ TEST(RunAgent, ExhaustsRoundsThenSynthesisesFinalAnswer) {
     EXPECT_EQ(r.calls.size(), 3u);             // one loop call per round
     EXPECT_EQ(r.answer, "Final synthesised answer from results.");
 }
+
+// ── Native tool-call protocols (parseToolCalls) ────────────────────────────────
+TEST(Protocols, HammerJsonList) {
+    auto p = parseToolCalls(R"([{"name":"stock","arguments":{"id":7}}])", ToolProtocol::Hammer);
+    ASSERT_EQ(p.size(), 1u);
+    EXPECT_EQ(p[0].tool, "stock");
+    EXPECT_EQ(p[0].args.value("id", 0), 7);
+}
+TEST(Protocols, HammerGarbageIsEmpty) {
+    EXPECT_TRUE(parseToolCalls("no calls here, just prose.", ToolProtocol::Hammer).empty());
+}
+
+TEST(Protocols, MistralToolCallsList) {
+    auto p = parseToolCalls(R"([TOOL_CALLS] [{"name":"stock","arguments":{}}])", ToolProtocol::Mistral);
+    ASSERT_EQ(p.size(), 1u);
+    EXPECT_EQ(p[0].tool, "stock");
+}
+TEST(Protocols, MistralGarbageIsEmpty) {
+    EXPECT_TRUE(parseToolCalls("[TOOL_CALLS] nothing valid", ToolProtocol::Mistral).empty());
+}
+
+TEST(Protocols, LlamaNameParameters) {
+    auto p = parseToolCalls(R"({"name":"stock","parameters":{"id":7}})", ToolProtocol::Llama);
+    ASSERT_EQ(p.size(), 1u);
+    EXPECT_EQ(p[0].tool, "stock");
+    EXPECT_EQ(p[0].args.value("id", 0), 7);   // "parameters" key variant is accepted
+}
+TEST(Protocols, LlamaGarbageIsEmpty) {
+    EXPECT_TRUE(parseToolCalls("Environment: ipython — but no call.", ToolProtocol::Llama).empty());
+}
+
+TEST(Protocols, HermesToolCallTags) {
+    auto p = parseToolCalls("<tool_call>\n{\"name\":\"stock\",\"arguments\":{}}\n</tool_call>",
+                            ToolProtocol::Hermes);
+    ASSERT_EQ(p.size(), 1u);
+    EXPECT_EQ(p[0].tool, "stock");
+}
+TEST(Protocols, HermesGarbageIsEmpty) {
+    EXPECT_TRUE(parseToolCalls("<tool_call> not json </tool_call>", ToolProtocol::Hermes).empty());
+}
+
+TEST(Protocols, LfmPythonBetweenTokens) {
+    auto p = parseToolCalls(
+        R"(<|tool_call_start|>[stock(id=7, tag="hi")]<|tool_call_end|>)", ToolProtocol::LfmPython);
+    ASSERT_EQ(p.size(), 1u);
+    EXPECT_EQ(p[0].tool, "stock");
+    EXPECT_EQ(p[0].args.value("id", 0), 7);
+    EXPECT_EQ(p[0].args.value("tag", ""), "hi");
+}
+TEST(Protocols, LfmPythonGarbageIsEmpty) {
+    EXPECT_TRUE(parseToolCalls("just a plain sentence with no calls", ToolProtocol::LfmPython).empty());
+}
+
+TEST(ParsePyToolCalls, BarePythonListNoTokens) {
+    auto p = parsePyToolCalls(R"([weather(city="Paris"), kpi()])");
+    ASSERT_EQ(p.size(), 2u);
+    EXPECT_EQ(p[0].tool, "weather");
+    EXPECT_EQ(p[0].args.value("city", ""), "Paris");
+    EXPECT_EQ(p[1].tool, "kpi");
+    EXPECT_TRUE(p[1].args.empty());
+}
+
+TEST(ParsePyToolCalls, IsKnownPredicateFilters) {
+    // A bare foo() in prose is not a real tool → predicate rejects it; falls back to plan (empty).
+    auto p = parsePyToolCalls("please call foo() now",
+                              [](const std::string& n) { return n == "stock"; });
+    EXPECT_TRUE(p.empty());
+}
+
+// ── sanitizeAnswer ─────────────────────────────────────────────────────────────
+TEST(SanitizeAnswer, StripsTrailingChatToken) {
+    EXPECT_EQ(sanitizeAnswer("The answer is 42.<|im_end|>"), "The answer is 42.");
+}
+TEST(SanitizeAnswer, LeadingRoleTokenBecomesEmpty) {
+    EXPECT_TRUE(sanitizeAnswer("<|eot_id|>next turn hallucination").empty());
+}
+TEST(SanitizeAnswer, StripsLeakedToolCallToken) {
+    EXPECT_EQ(sanitizeAnswer("Done.<|tool_call_start|>[x()]"), "Done.");
+}
+TEST(SanitizeAnswer, RemovesCodeFences) {
+    EXPECT_EQ(sanitizeAnswer("```\nplain\n```"), "plain");
+}
+TEST(SanitizeAnswer, CleanAnswerUnchanged) {
+    EXPECT_EQ(sanitizeAnswer("A tidy plain answer."), "A tidy plain answer.");
+}
+
+// ── Agent-loop robustness ──────────────────────────────────────────────────────
+TEST(RunAgent, EnforcesGlobalToolCallCap) {
+    ToolRegistry reg;
+    reg.add("loop", "loops", "", [](const nlohmann::json&) { return std::string("x"); });
+    // A single plan asks for 10 loop calls; the cap (8) stops execution then synthesises.
+    Scripted gen({
+        R"([{"name":"loop","arguments":{"i":0}},{"name":"loop","arguments":{"i":1}},
+            {"name":"loop","arguments":{"i":2}},{"name":"loop","arguments":{"i":3}},
+            {"name":"loop","arguments":{"i":4}},{"name":"loop","arguments":{"i":5}},
+            {"name":"loop","arguments":{"i":6}},{"name":"loop","arguments":{"i":7}},
+            {"name":"loop","arguments":{"i":8}},{"name":"loop","arguments":{"i":9}}])",
+        "Final answer after the cap.",
+    });
+    auto r = runAgent(gen, reg, "go");
+    EXPECT_EQ(r.calls.size(), static_cast<std::size_t>(kMaxToolCalls));   // capped at 8
+    EXPECT_EQ(r.answer, "Final answer after the cap.");
+}
+
+TEST(RunAgent, CachesDuplicateToolCall) {
+    int executions = 0;
+    ToolRegistry reg;
+    reg.add("read", "reads", "", [&executions](const nlohmann::json&) {
+        ++executions; return std::string("value");
+    });
+    // Two identical calls in one plan: executed once (cache hit on the second).
+    Scripted gen({
+        R"([{"name":"read","arguments":{"k":"a"}},{"name":"read","arguments":{"k":"a"}}])",
+        "Done.",
+    });
+    auto r = runAgent(gen, reg, "go");
+    EXPECT_EQ(r.calls.size(), 2u);      // both recorded
+    EXPECT_EQ(executions, 1);           // but executed only once
+}
+
+TEST(RunAgent, CancellationStopsBeforeExecuting) {
+    int executions = 0;
+    ToolRegistry reg;
+    reg.add("read", "reads", "", [&executions](const nlohmann::json&) {
+        ++executions; return std::string("value");
+    });
+    Scripted gen({ R"([{"name":"read","arguments":{}}])", "should not reach" });
+    auto r = runAgent(gen, reg, "go", 4, ToolProtocol::PlanJson, [] { return true; });
+    EXPECT_EQ(executions, 0);                  // cancelled before any tool ran
+    EXPECT_TRUE(r.calls.empty());
+    EXPECT_EQ(r.answer, "Request cancelled.");
+}
+
+TEST(RunAgent, FiltersUnknownToolFromPlan) {
+    ToolRegistry reg;
+    reg.add("add", "add", "", [](const nlohmann::json& a) {
+        return std::to_string(a.value("a", 0) + a.value("b", 0));
+    });
+    // Plan names a bogus tool alongside a real one; only the real one executes.
+    Scripted gen({
+        R"([{"name":"Gloves","arguments":{}},{"name":"add","arguments":{"a":2,"b":3}}])",
+        "The sum is 5.",
+    });
+    auto r = runAgent(gen, reg, "go");
+    ASSERT_EQ(r.calls.size(), 1u);
+    EXPECT_EQ(r.calls[0].tool, "add");
+    EXPECT_EQ(r.answer, "The sum is 5.");
+}
+
+TEST(RunAgent, RetriesOnBotchedFormatThenRecovers) {
+    ToolRegistry reg;
+    reg.add("add", "add", "", [](const nlohmann::json& a) {
+        return std::to_string(a.value("a", 0) + a.value("b", 0));
+    });
+    // Round 1: an obviously-intended but unparseable call (has "tool"/"args", no balanced JSON).
+    // The agent nudges once; round 2 is valid; round 3 is the final answer.
+    Scripted gen({
+        R"({"tool":"add","args":{"a":2,"b":3)",
+        R"([{"name":"add","arguments":{"a":2,"b":3}}])",
+        "The sum is 5.",
+    });
+    auto r = runAgent(gen, reg, "2+3?");
+    ASSERT_EQ(r.calls.size(), 1u);
+    EXPECT_EQ(r.calls[0].tool, "add");
+    EXPECT_EQ(r.answer, "The sum is 5.");
+    EXPECT_EQ(r.rounds, 3);              // round1 nudge, round2 exec, round3 final
+}
+
+// ── Per-protocol system prompt ─────────────────────────────────────────────────
+TEST(SystemPrompt, NativeProtocolsEmitTheirScaffolding) {
+    ToolRegistry reg;
+    reg.add("stock", "Stock level", R"({"id":<n>})", [](const nlohmann::json&) { return std::string(); });
+    EXPECT_NE(systemPrompt(reg, ToolProtocol::Hermes).find("<tools>"), std::string::npos);
+    EXPECT_NE(systemPrompt(reg, ToolProtocol::Mistral).find("[AVAILABLE_TOOLS]"), std::string::npos);
+    EXPECT_NE(systemPrompt(reg, ToolProtocol::Llama).find("Environment: ipython"), std::string::npos);
+    EXPECT_NE(systemPrompt(reg, ToolProtocol::Hammer).find("[BEGIN OF TASK INSTRUCTION]"), std::string::npos);
+    EXPECT_NE(systemPrompt(reg, ToolProtocol::LfmPython).find("<|tool_call_start|>"), std::string::npos);
+    // PlanJson delegates to the model-agnostic prompt.
+    EXPECT_EQ(systemPrompt(reg, ToolProtocol::PlanJson), systemPrompt(reg));
+}

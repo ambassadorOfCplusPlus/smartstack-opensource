@@ -11,6 +11,7 @@
 // across a 13-model local-LLM benchmark (see docs/RESEARCH.md). MIT licensed.
 #pragma once
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <optional>
@@ -39,6 +40,17 @@ struct Tool {
     std::string params;        // human arg hint, e.g. {"city": "..."} — for the prompt
     ToolFn fn;                 // the implementation
 };
+
+// Tool-call wire protocol. PlanJson is the model-agnostic default (a JSON plan
+// {"plan":[…]} — the most robust across weak models). The rest are the NATIVE
+// formats families were trained on (using them can be more reliable for that
+// family): LfmPython (LFM2 / Llama 3.2 — a python-style [func(arg=val)] list between
+// <|tool_call_start|>/<|tool_call_end|> tokens), Hammer (xLAM structured JSON list),
+// Mistral ([AVAILABLE_TOOLS]/[TOOL_CALLS]), Llama (Environment: ipython + JSON
+// {"name","parameters"}), Hermes (<tools>/<tool_call> tags). The scaffolding differs
+// per protocol; parsing is tolerant and shared (see parseToolCalls). No domain
+// knowledge — mapping a concrete model id to a protocol is the caller's job.
+enum class ToolProtocol { PlanJson, LfmPython, Hammer, Mistral, Llama, Hermes };
 
 // ── Tool platform: register your tools here ────────────────────────────────────
 // This is the plugin point. A developer does:
@@ -230,6 +242,152 @@ inline ThinkSplit splitThinking(const std::string& out) {
     return r;
 }
 
+// ── Native LFM2 protocol: python-style tool calls (pure string parse, no Python) ──
+namespace detail {
+// Truncate to `cap` BYTES without splitting a UTF-8 codepoint (walk back off any
+// continuation bytes 0b10xxxxxx), appending `suffix` only when actually cut.
+inline std::string utf8Truncate(const std::string& s, std::size_t cap, const std::string& suffix) {
+    if (s.size() <= cap) return s;
+    std::size_t cut = cap;
+    while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
+    return s.substr(0, cut) + suffix;
+}
+
+// One python argument value → JSON (quoted string / number / bool); bare word → string.
+inline nlohmann::json pyValue(const std::string& raw) {
+    const std::string v = trim(raw);
+    if (v.size() >= 2 && (v.front() == '"' || v.front() == '\'') && v.back() == v.front()) {
+        const std::string inner = v.substr(1, v.size() - 2);
+        std::string s;
+        for (std::size_t i = 0; i < inner.size(); ++i) {
+            if (inner[i] == '\\' && i + 1 < inner.size()) {
+                const char n = inner[++i];
+                s += (n == 'n') ? '\n' : (n == 't') ? '\t' : n;
+            } else s += inner[i];
+        }
+        return s;
+    }
+    if (v == "true" || v == "True")   return true;
+    if (v == "false" || v == "False") return false;
+    try {
+        std::size_t pos = 0;
+        if (v.find_first_of(".eE") == std::string::npos) {
+            const long long n = std::stoll(v, &pos);
+            if (pos == v.size()) return n;
+        } else {
+            const double d = std::stod(v, &pos);
+            if (pos == v.size()) return d;
+        }
+    } catch (...) {}
+    return v;
+}
+
+// func(...) argument text → {key: value}. Splits on TOP-LEVEL commas (outside strings
+// and brackets). Positional args (no '=') are skipped — tools take named args.
+inline nlohmann::json pyArgs(const std::string& argStr) {
+    nlohmann::json args = nlohmann::json::object();
+    std::vector<std::string> parts;
+    std::size_t start = 0; int depth = 0; bool inStr = false; char q = 0; bool esc = false;
+    for (std::size_t i = 0; i < argStr.size(); ++i) {
+        const char c = argStr[i];
+        if (inStr) { if (esc) esc = false; else if (c == '\\') esc = true; else if (c == q) inStr = false; }
+        else if (c == '"' || c == '\'') { inStr = true; q = c; }
+        else if (c == '(' || c == '[' || c == '{') ++depth;
+        else if (c == ')' || c == ']' || c == '}') --depth;
+        else if (c == ',' && depth == 0) { parts.push_back(argStr.substr(start, i - start)); start = i + 1; }
+    }
+    parts.push_back(argStr.substr(start));
+    for (const auto& part : parts) {
+        const std::string t = trim(part);
+        const auto eq = t.find('=');
+        if (eq == std::string::npos || eq == 0) continue;
+        const std::string key = trim(t.substr(0, eq));
+        bool ident = !key.empty();
+        for (char ch : key) if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_')) ident = false;
+        if (ident) args[key] = pyValue(t.substr(eq + 1));
+    }
+    return args;
+}
+} // namespace detail
+
+// Parse the LFM2 native format: a python-style list of calls [tool(arg="x"), t2()],
+// optionally fenced by <|tool_call_start|>/<|tool_call_end|>. Pure string parsing — no
+// Python is run. `isKnown` (optional) filters identifiers that are real tools, so a
+// bare `foo()` in prose is not mistaken for a call; when empty, every `name(...)` is
+// taken. Falls back to parsePlan when no python-style call is found (some LFM builds
+// emit JSON / <tool_call> instead).
+inline std::vector<ToolCall> parsePyToolCalls(
+    const std::string& out, const std::function<bool(const std::string&)>& isKnown = {}) {
+    std::vector<ToolCall> calls;
+    static constexpr char kStart[] = "<|tool_call_start|>";
+    static constexpr char kEnd[]   = "<|tool_call_end|>";
+    std::string s = out;
+    if (const auto a = out.find(kStart); a != std::string::npos) {
+        const std::size_t from = a + (sizeof(kStart) - 1);
+        const auto b = out.find(kEnd, from);
+        s = out.substr(from, b == std::string::npos ? std::string::npos : b - from);
+    }
+    for (std::size_t i = 0; i < s.size();) {
+        if (!(std::isalpha(static_cast<unsigned char>(s[i])) || s[i] == '_')) { ++i; continue; }
+        const std::size_t nameStart = i;
+        while (i < s.size() && (std::isalnum(static_cast<unsigned char>(s[i])) || s[i] == '_')) ++i;
+        const std::string name = s.substr(nameStart, i - nameStart);
+        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+        if (i >= s.size() || s[i] != '(') continue;   // identifier but not a call
+        const std::size_t argStart = ++i;
+        int depth = 1; bool inStr = false; char q = 0; bool esc = false;
+        for (; i < s.size() && depth > 0; ++i) {
+            const char c = s[i];
+            if (inStr) { if (esc) esc = false; else if (c == '\\') esc = true; else if (c == q) inStr = false; }
+            else if (c == '"' || c == '\'') { inStr = true; q = c; }
+            else if (c == '(') ++depth;
+            else if (c == ')') --depth;
+        }
+        if (depth != 0) break;   // unbalanced — stop
+        const std::string argStr = s.substr(argStart, (i - 1) - argStart);   // without ')'
+        if (!isKnown || isKnown(name))
+            calls.push_back(ToolCall{name, detail::pyArgs(argStr)});
+    }
+    if (calls.empty()) return parsePlan(out);   // JSON / <tool_call> fallback
+    return calls;
+}
+
+// Parse tool calls from model output according to `protocol`. PlanJson/Hammer/Mistral/
+// Llama/Hermes all emit JSON (a plan, a [TOOL_CALLS] list, {"name","parameters"}, or
+// <tool_call>{…}</tool_call>) which parsePlan scans out of surrounding prose; LfmPython
+// is python-style. For the JSON protocols we still fall back to the python parser, which
+// catches models (e.g. Llama 3.2) that emit python-style calls under a JSON protocol.
+inline std::vector<ToolCall> parseToolCalls(const std::string& out, ToolProtocol protocol) {
+    if (protocol == ToolProtocol::LfmPython) return parsePyToolCalls(out);
+    std::vector<ToolCall> p = parsePlan(out);
+    if (p.empty()) p = parsePyToolCalls(out);
+    return p;
+}
+
+// ── Answer sanitising ───────────────────────────────────────────────────────────
+// Strip leaked chat-template control tokens (a model "hallucinating" the next turn)
+// and residual code fences from the final answer. A concrete token list (not a bare
+// "<|") so legitimate prose with "<|" is left intact. A clean answer is unchanged.
+inline std::string sanitizeAnswer(const std::string& in) {
+    std::string s = in;
+    for (const char* m : {"<|user|>", "<|assistant|>", "<|system|>", "<|im_start|>",
+                          "<|im_end|>", "<|endoftext|>", "<|end|>", "<|eot_id|>",
+                          "<|tool_call_start|>", "<|tool_call_end|>", "```json", "```JSON"})
+        if (const auto p = s.find(m); p != std::string::npos) s = s.substr(0, p);
+    for (std::size_t p; (p = s.find("```")) != std::string::npos;) s.erase(p, 3);
+    return detail::trim(s);
+}
+
+// Did the model clearly ATTEMPT a tool call that failed to parse (even after repair)?
+// If so, runAgent gives it one chance to reissue in valid form instead of treating the
+// broken output as a final answer.
+inline bool looksLikeToolAttempt(const std::string& a) {
+    return a.find("tool_call") != std::string::npos ||
+           a.find("\"plan\":[{") != std::string::npos ||
+           a.find("\"arguments\"") != std::string::npos ||
+           (a.find("\"tool\"") != std::string::npos && a.find("\"args\"") != std::string::npos);
+}
+
 // ── System prompt ──────────────────────────────────────────────────────────────
 // Lists the registered tools, the call format (a JSON plan), and anti-hallucination
 // rules. Generic — no domain knowledge.
@@ -251,6 +409,89 @@ inline std::string systemPrompt(const ToolRegistry& reg) {
     return p;
 }
 
+// Tools as a JSON array for the NATIVE formats (Hermes/Mistral/Llama): {name,
+// description(+example), parameters}. `params` is a human hint, not a real JSON schema,
+// so `parameters` stays open ({"type":"object"}) and the example goes into description.
+inline std::string toolsJsonForNative(const ToolRegistry& reg) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const Tool* t : reg.tools())
+        arr.push_back({{"name", t->name},
+                       {"description", t->description +
+                            (t->params.empty() ? std::string() : " Example args: " + t->params)},
+                       {"parameters", {{"type", "object"}}}});
+    return arr.dump();
+}
+
+// Per-protocol system prompt. PlanJson delegates to the model-agnostic prompt above;
+// the others emit the scaffolding each family was trained on (generic — no domain rules,
+// which are the caller's job to append). All keep the "don't invent numbers" guardrail.
+inline std::string systemPrompt(const ToolRegistry& reg, ToolProtocol protocol) {
+    if (protocol == ToolProtocol::Hermes)
+        return
+            "You are a function-calling assistant. You are given function signatures in "
+            "<tools></tools>. Decide which to call and return EACH call as a JSON object "
+            "{\"name\":..., \"arguments\":...} inside <tool_call></tool_call> tags:\n<tools>\n"
+            + toolsJsonForNative(reg) + "\n</tools>\n"
+            "Example: <tool_call>\n{\"name\": \"<tool>\", \"arguments\": {}}\n</tool_call>\n"
+            "Do NOT invent numbers — only state values returned by tools. "
+            "If no function is needed, reply in plain text.\n";
+    if (protocol == ToolProtocol::Mistral)
+        return
+            "You are a function-calling assistant. Available functions:\n"
+            "[AVAILABLE_TOOLS] " + toolsJsonForNative(reg) + " [/AVAILABLE_TOOLS]\n"
+            "When you need data, return the calls as a list: [TOOL_CALLS] "
+            "[{\"name\": \"<tool>\", \"arguments\": {}}]. "
+            "Do NOT invent numbers — only state values returned by tools. "
+            "If no data is needed, reply in plain text.\n";
+    if (protocol == ToolProtocol::Llama)
+        return
+            "Environment: ipython\n"
+            "You are a function-calling assistant. Available functions (JSON):\n"
+            + toolsJsonForNative(reg) + "\n"
+            "When you need data, return a call as a JSON object "
+            "{\"name\": \"<tool>\", \"parameters\": {}} (several allowed inside [ ... ]). "
+            "Do NOT invent numbers — only state values returned by tools. "
+            "If no data is needed, reply in plain text.\n";
+    if (protocol == ToolProtocol::Hammer) {
+        nlohmann::json toolsJson = nlohmann::json::array();
+        for (const Tool* t : reg.tools())
+            toolsJson.push_back({{"name", t->name}, {"description", t->description},
+                                 {"example_arguments", t->params}});
+        return
+            "[BEGIN OF TASK INSTRUCTION]\n"
+            "You are a function-calling assistant. Pick the needed functions and return their "
+            "calls. Take numbers ONLY from function results — do not invent them. If no "
+            "functions are needed, return an empty list [].\n"
+            "[END OF TASK INSTRUCTION]\n\n"
+            "[BEGIN OF AVAILABLE TOOLS]\n" + toolsJson.dump() + "\n[END OF AVAILABLE TOOLS]\n\n"
+            "[BEGIN OF FORMAT INSTRUCTION]\n"
+            "Your output must be STRICTLY a JSON list of calls and nothing else (no markdown, "
+            "no ```):\n[{\"name\": \"function\", \"arguments\": {\"arg\": \"value\"}}]\n"
+            "After receiving results, give a short final answer in plain text.\n"
+            "[END OF FORMAT INSTRUCTION]\n";
+    }
+    if (protocol == ToolProtocol::LfmPython) {
+        std::string p =
+            "You are a helpful assistant that can call tools (read-only).\n"
+            "When you need data, IMMEDIATELY call tools as a python-style list of calls "
+            "between the special tokens, with no prose around them:\n"
+            "<|tool_call_start|>[tool_name(arg=\"value\"), other_tool()]<|tool_call_end|>\n"
+            "List all needed calls at once; the system executes them and returns results.\n"
+            "If no data is needed, just answer with a short plain-text reply, without calls.\n"
+            "Available tools (name — what it does; args — by example):\n";
+        for (const Tool* t : reg.tools()) {
+            p += "- " + t->name + " — " + t->description;
+            if (!t->params.empty()) p += " Args (example): " + t->params;
+            p += "\n";
+        }
+        p += "Rules: 1) Never invent numbers — only use tool results. 2) The name in a call "
+             "is EXACTLY from the list above. 3) After receiving results, give a short final "
+             "plain-text answer.\n";
+        return p;
+    }
+    return systemPrompt(reg);   // PlanJson (default)
+}
+
 // ── Agent loop ─────────────────────────────────────────────────────────────────
 // Plan protocol (the most robust across weak models — see docs/RESEARCH.md): the
 // model proposes tool calls as JSON, WE execute them deterministically against the
@@ -262,23 +503,88 @@ struct AgentResult {
     int rounds = 0;                 // generation rounds used
 };
 
+// Overall cap on tool executions per question — a runaway guard independent of maxRounds
+// (a single plan can request many calls). Once hit, one closing generation synthesises
+// the answer from what was gathered.
+inline constexpr int kMaxToolCalls = 8;
+// Long tool results are clipped before going back to the model: summaries/totals lead,
+// so tail truncation is safe, and a bloated context slows and confuses weak models.
+inline constexpr std::size_t kToolResultClip = 1800;
+
+namespace detail {
+// One-line "your call was invalid, reissue it" nudge, phrased for the protocol.
+inline std::string retryHint(ToolProtocol p) {
+    if (p == ToolProtocol::LfmPython)
+        return "Your tool call was INVALID and could not be parsed. Repeat it EXACTLY as "
+               "<|tool_call_start|>[tool_name(arg=\"value\")]<|tool_call_end|> — or, if no "
+               "tools are needed, answer in plain text.";
+    return "Your tool-call JSON was INVALID (syntax error) and could not be parsed. Repeat "
+           "it EXACTLY as {\"plan\":[{\"name\":\"tool\",\"arguments\":{...}}]} — or, if no "
+           "tools are needed, answer in plain text.";
+}
+} // namespace detail
+
 inline AgentResult runAgent(IGenerator& gen, const ToolRegistry& reg,
-                            const std::string& question, int maxRounds = 4) {
+                            const std::string& question, int maxRounds = 4,
+                            ToolProtocol protocol = ToolProtocol::PlanJson,
+                            const std::function<bool()>& cancelled = {}) {
     AgentResult res;
-    std::string prompt = systemPrompt(reg) + "\nUser: " + question + "\nAssistant:";
-    for (int round = 1; round <= maxRounds; ++round) {
+    auto stopped = [&] { return cancelled && cancelled(); };
+    std::string prompt = systemPrompt(reg, protocol) + "\nUser: " + question + "\nAssistant:";
+    int toolCalls = 0;                                   // global cap across rounds
+    std::map<std::string, std::string> cache;            // per-request result dedup
+    bool formatRetried = false;                          // one botched-format nudge, max
+    // KV-cache note: the upstream engine feeds only the incremental segment on rounds>0
+    // (a firstStep flag) so llama can reuse the KV cache. IGenerator::generate takes a full
+    // prompt with no incremental hook, so aitc re-sends the growing prompt each round; an
+    // adapter that caches can key off the shared prompt prefix. Left as a note, not a break.
+    for (int round = 1; round <= std::max(1, maxRounds); ++round) {
         res.rounds = round;
         const std::string raw = gen.generate(prompt);
         const std::string answer = splitThinking(raw).answer;
-        std::vector<ToolCall> plan = parsePlan(answer);
+        std::vector<ToolCall> plan = parseToolCalls(answer, protocol);
+        // Drop unknown tools (weak models call a product/field name as if it were a tool).
+        plan.erase(std::remove_if(plan.begin(), plan.end(),
+                   [&](const ToolCall& c) { return !reg.has(c.tool); }), plan.end());
+        // Cancellation: after generation, before executing anything.
+        if (stopped()) {
+            res.answer = plan.empty() ? sanitizeAnswer(answer) : std::string("Request cancelled.");
+            return res;
+        }
+        // Botched but clearly-intended tool call → one chance to reissue in valid form.
+        if (plan.empty() && !formatRetried && looksLikeToolAttempt(answer)) {
+            formatRetried = true;
+            prompt += answer + "\n" + detail::retryHint(protocol) + "\nAssistant:";
+            continue;
+        }
         if (plan.empty()) {                 // no tool calls → final answer
-            res.answer = answer;
+            res.answer = sanitizeAnswer(answer);
             return res;
         }
         std::string feedback = "\nTool results:\n";
+        bool capped = false;
         for (const auto& call : plan) {
+            if (toolCalls >= kMaxToolCalls) { capped = true; break; }
+            ++toolCalls;
             res.calls.push_back(call);
-            feedback += call.tool + " => " + reg.execute(call) + "\n";
+            // Per-request cache: identical (tool, args) is not executed twice (weak models
+            // re-request the same tool between rounds; read-only data is stable per question).
+            const std::string key = call.tool + "|" + call.args.dump();
+            std::string result;
+            auto it = cache.find(key);
+            if (it != cache.end()) result = it->second;
+            else { result = reg.execute(call); cache.emplace(key, result); }
+            feedback += call.tool + " => " +
+                        detail::utf8Truncate(result, kToolResultClip, "\n…(result truncated)") + "\n";
+            if (stopped()) { res.answer = "Request cancelled."; return res; }
+        }
+        if (capped) {
+            feedback += "(tool-call limit reached; remaining calls skipped)\n";
+            const std::string finalRaw = gen.generate(
+                prompt + answer + feedback +
+                "\nNow give the final answer in plain text, without any tool calls.\nAssistant:");
+            res.answer = sanitizeAnswer(splitThinking(finalRaw).answer);
+            return res;
         }
         // Append the think-STRIPPED answer (keeps the plan, drops the model's own <think>
         // tokens so reasoning doesn't accumulate in the growing context) + tool results.
@@ -288,7 +594,7 @@ inline AgentResult runAgent(IGenerator& gen, const ToolRegistry& reg,
     // synthesise a plain-text answer from the gathered results — don't discard them.
     const std::string finalRaw = gen.generate(
         prompt + " Now give the final answer in plain text, without any tool calls.");
-    res.answer = splitThinking(finalRaw).answer;
+    res.answer = sanitizeAnswer(splitThinking(finalRaw).answer);
     return res;
 }
 
