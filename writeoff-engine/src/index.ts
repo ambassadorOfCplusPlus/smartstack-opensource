@@ -25,6 +25,17 @@ export {
 } from './types';
 
 export {
+  reserve,
+  confirm,
+  cancel,
+  expireOutdated,
+  DEFAULT_TTL_MINUTES,
+  type Reservation,
+  type ReservationLeg,
+  type ReserveOutcome,
+} from './reservation.service';
+
+export {
   FakeBatchStore,
   makeState,
   withTransaction,

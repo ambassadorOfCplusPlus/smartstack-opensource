@@ -4,6 +4,11 @@
 **средневзвешенная** (weighted average). Storage-agnostic — хранилище подключаете
 своё через интерфейс `BatchStore`. Без БД, без Prisma, без Qt.
 
+**НОВОЕ:** резервы под заказ (`ReservationService`: `reserve` / `confirm` /
+`cancel` / `expireOutdated`, подбор партий FIFO), кламп доли для
+средневзвешенной, дополнительные причины движений `return` (возврат) и
+`inventory_correction` (корректировка при инвентаризации).
+
 > Batch (lot) inventory write-off engine: FIFO, LIFO, weighted average. Bring your
 > own storage via the `BatchStore` interface. No database required to run or test.
 
@@ -114,12 +119,18 @@ class MyStore implements BatchStore {
 при `INSUFFICIENT_STOCK` движок бросает исключение (`err.code === 'INSUFFICIENT_STOCK'`),
 ваша транзакция откатится — частичных списаний не будет.
 
-## Скрипты
+## Разработка
 
 ```bash
-npm run build   # tsc -> dist/
-npm test        # vitest run
+npm install
+npx tsc --noEmit   # типчек (отдельного npm-скрипта нет)
+npm test           # vitest run — 26 тестов (списание + резервы, без БД)
+npm run build      # tsc → dist/
 ```
+
+Ревью: правки сверять с C++ оригиналом в `cpp-reference/` (`WriteoffEngine`) и
+источником в основном проекте SmartStock; логику держать чистой — тестируемой без
+БД (in-memory `FakeBatchStore`).
 
 ## C++ оригинал
 
