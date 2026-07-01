@@ -25,14 +25,23 @@
 - `journal.ts` — `InMemoryJournal`: идемпотентность по UUID + монотонный
   `serverSeq` + курсор `pull`. Storage-agnostic интерфейс `OperationJournal`.
 
-## Запуск
+**НОВОЕ — актуальный реле-стек** (рядом с legacy `serverSeq`-моделью): E2E-кодек
+(AES-256-GCM), транспорт реле, движок с дедупом по `op_id` и оркестратор по
+ts-курсору. Обе модели живут вместе; разбор — в
+[`docs/DESIGN.md` §8](docs/DESIGN.md).
+
+## Разработка
 
 ```bash
-npm i
+npm install
 npm run typecheck   # tsc --noEmit, strict
-npm test            # vitest (40 тестов)
+npm test            # vitest run — 71 тест (ядро + реле-стек)
 npm run build       # → dist/
 ```
+
+Ревью: правки сверять с оригинальным серверным кодом в `reference/` и источником
+в основном проекте SmartStock; кодеки/движок дедупа держать чистыми —
+тестируемыми без сети и БД.
 
 ## Идея в двух строках
 
