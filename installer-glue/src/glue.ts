@@ -23,6 +23,8 @@
 // приводим через (zlib as any).crc32.
 
 import zlib from 'node:zlib';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join, dirname, resolve, relative, isAbsolute } from 'node:path';
 
 export const MAGIC = Buffer.from('SMSTOCK1', 'latin1'); // 8 байт
 export const MAGIC_LEN = 8;
@@ -154,4 +156,98 @@ export function extractPayload(buffer: Buffer): ExtractedPayload | null {
   }
 
   return { manifest, files };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Распаковка вложенных файлов на диск + sidecar-режим.
+//
+// Порт из десктопного ConfigReader (C++/Qt): extractTo + readSidecar/readManifest.
+// Overlay-«хвост» в проде убрали (антивирусы) — актуальный путь чтения manifest
+// это sidecar-файл manifest.json РЯДОМ с exe; чтение хвоста оставлено как fallback.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Имя sidecar-манифеста, который сервер кладёт рядом с exe (без дозаписи хвоста).
+export const SIDECAR_NAME = 'manifest.json';
+
+// Проверить имя вложенного файла и вернуть безопасный абсолютный путь ВНУТРИ root.
+// Защита от path-traversal: имя источника недоверенное (хвост/манифест). Отклоняем
+// абсолютные пути, диск-префиксы (C:), UNC и любые сегменты «..». Сепараторы обоих
+// видов нормализуем (файлы порождает Windows-сервер, извлекать могут на POSIX).
+function resolveSafeName(root: string, name: string): string {
+  const normalized = name.replace(/\\/g, '/');
+  if (
+    normalized === '' ||
+    normalized.startsWith('/') || // POSIX-абсолют / ведущий слэш (в т.ч. UNC //)
+    /^[a-zA-Z]:/.test(normalized) || // диск-префикс Windows (C:\, D:/)
+    normalized.split('/').includes('..') // любой сегмент «..»
+  ) {
+    throw new Error(`extractTo: небезопасное имя файла (path traversal): ${name}`);
+  }
+  const target = resolve(root, normalized);
+  const rel = relative(root, target);
+  // Доп. рубеж: результат обязан лежать внутри root (rel не начинается с «..»
+  // и не является абсолютным).
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`extractTo: путь выходит за пределы каталога: ${name}`);
+  }
+  return target;
+}
+
+// Распаковать файлы payload в каталог destDir (создаётся при необходимости).
+// Каждое имя проходит проверку resolveSafeName (path-traversal → исключение до
+// любой записи по этому имени). Возвращает список записанных абсолютных путей.
+export function extractTo(payload: ExtractedPayload, destDir: string): string[] {
+  const root = resolve(destDir);
+  mkdirSync(root, { recursive: true });
+
+  const written: string[] = [];
+  for (const f of payload.files) {
+    const target = resolveSafeName(root, f.name);
+    mkdirSync(dirname(target), { recursive: true }); // на случай вложенных подкаталогов
+    writeFileSync(target, f.data);
+    written.push(target);
+  }
+  return written;
+}
+
+// Прочитать sidecar-manifest (файл manifest.json в каталоге dir). Доп. файлы при
+// этом способе не переносятся (их сервер кладёт рядом в zip). Нет файла / битый
+// JSON / не-объект → null (без исключений).
+export function readSidecar(dir: string): ExtractedPayload | null {
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(join(dir, SIDECAR_NAME));
+  } catch {
+    return null; // нет файла / нет доступа
+  }
+
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return null; // битый JSON
+  }
+  // Требуем именно JSON-объект (как isObject() в десктопе): массив/скаляр → null.
+  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    return null;
+  }
+
+  return { manifest, files: [] };
+}
+
+// Прочитать manifest, предпочитая sidecar-формат: сначала ищем manifest.json
+// РЯДОМ с exe (актуальный способ), иначе — вшитый «хвост» extractPayload
+// (обратная совместимость с уже розданными exe). Любая ошибка → null.
+export function readManifest(exePath: string): ExtractedPayload | null {
+  const dir = dirname(resolve(exePath));
+  const sidecar = readSidecar(dir);
+  if (sidecar) return sidecar;
+
+  let buffer: Buffer;
+  try {
+    buffer = readFileSync(exePath);
+  } catch {
+    return null;
+  }
+  return extractPayload(buffer);
 }

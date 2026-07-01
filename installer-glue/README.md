@@ -71,6 +71,9 @@ installer-glue append \
 
 # Прочитать вшитый хвост, вывести manifest и проверить CRC32
 installer-glue read SmartStock-user42.exe
+
+# Распаковать файлы из хвоста на диск (защита от path-traversal)
+installer-glue extract SmartStock-user42.exe --out ./out-dir
 ```
 
 `--file name=path` можно повторять; `name` — имя, под которым файл будет лежать в хвосте.
@@ -90,6 +93,15 @@ const parsed = extractPayload(out); // null если хвоста нет или 
 Экспортируется также `MAGIC`, `MAGIC_LEN`, `FOOTER_LEN` и типы `EmbeddedFile`,
 `ExtractedPayload`.
 
+**НОВОЕ:**
+- `extractTo(payload, dir)` — распаковка вложенных файлов на диск с **защитой от
+  path-traversal** (имена вида `../` / абсолютные пути отклоняются, ничего не
+  пишется за пределы `dir`).
+- **Sidecar-режим** (актуальное направление продукта, см. предупреждение выше):
+  `readSidecar(path)` / `readManifest(path)` — чтение манифеста/файлов из
+  соседнего `manifest.json` вместо overlay-хвоста.
+- CLI-команда `extract` — распаковать файлы хвоста в каталог.
+
 ---
 
 ## Клиентский ридер / Matching reader
@@ -99,15 +111,19 @@ const parsed = extractPayload(out); // null если хвоста нет или 
 проверяет CRC32. Поскольку CRC32 здесь **zlib-совместимый**, нативный ридер на C++
 (`zlib::crc32`) валидирует ровно те же байты, что и эта библиотека.
 
-## Установка и сборка
+## Разработка
 
 ```bash
 npm install
-npm run build   # tsc → dist/
-npm test        # vitest
+npx tsc --noEmit   # типчек (отдельного npm-скрипта нет)
+npm test           # vitest run — 26 тестов (склейка + extractTo + sidecar)
+npm run build      # tsc → dist/
 ```
 
 Без runtime-зависимостей (только встроенный `node:zlib`). Требуется Node >= 20.15.
+
+Ревью: правки сверять с источником в основном проекте SmartStock; логику
+хвоста/sidecar держать чистой — тестируемой без сети (in-memory буферы + temp-каталоги).
 
 ## Лицензия
 

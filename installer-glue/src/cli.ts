@@ -9,7 +9,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { appendPayload, extractPayload, type EmbeddedFile } from './glue';
+import { appendPayload, extractPayload, extractTo, type EmbeddedFile } from './glue';
 
 // Разобрать аргументы вида --key value (флаги) и собрать --file повторно.
 interface ParsedArgs {
@@ -69,8 +69,12 @@ const USAGE = `installer-glue — склейка персонального ус
   append --base <base.exe> --manifest <manifest.json> [--file name=path ...] --out <out.exe>
       Дописать хвост (manifest + файлы) к base.exe и записать out.exe.
 
-  read <file.exe>
+  read <file.exe> [--out <dir>]
       Прочитать вшитый хвост: вывести manifest JSON, проверить CRC32, перечислить файлы.
+      С --out дополнительно распаковать вложенные файлы в каталог dir.
+
+  extract <file.exe> --out <dir>
+      Распаковать вложенные файлы из хвоста в каталог dir (с защитой от path-traversal).
 `;
 
 function cmdAppend(parsed: ParsedArgs): void {
@@ -121,6 +125,42 @@ function cmdRead(parsed: ParsedArgs): void {
     process.stdout.write(`  - ${f.name} (${f.data.length} байт)\n`);
   }
   process.stdout.write('\nCRC32: OK (валиден)\n');
+
+  const outDir = parsed.flags['out'];
+  if (outDir) {
+    let written: string[];
+    try {
+      written = extractTo(extracted, outDir);
+    } catch (e) {
+      fail((e as Error).message);
+    }
+    process.stdout.write(`\nраспаковано в ${outDir}: ${written.length} файл(ов)\n`);
+  }
+}
+
+function cmdExtract(parsed: ParsedArgs): void {
+  const filePath = parsed.positional[0];
+  if (!filePath) {
+    fail('укажите путь: installer-glue extract <file.exe> --out <dir>');
+  }
+  const outDir = requireFlag(parsed.flags, 'out');
+
+  const buffer = readFileSync(filePath);
+  const extracted = extractPayload(buffer);
+  if (!extracted) {
+    fail(`хвост не найден или повреждён (нет MAGIC / битый CRC32) в ${basename(filePath)}`);
+  }
+
+  let written: string[];
+  try {
+    written = extractTo(extracted, outDir);
+  } catch (e) {
+    fail((e as Error).message);
+  }
+  process.stdout.write(`OK: распаковано в ${outDir}: ${written.length} файл(ов)\n`);
+  for (const p of written) {
+    process.stdout.write(`  - ${p}\n`);
+  }
 }
 
 function main(): void {
@@ -140,6 +180,9 @@ function main(): void {
       break;
     case 'read':
       cmdRead(parsed);
+      break;
+    case 'extract':
+      cmdExtract(parsed);
       break;
     default:
       fail(`неизвестная команда "${command}". См. installer-glue --help`);
